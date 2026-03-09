@@ -309,12 +309,27 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js');
 }
 
+// Handle shared text from Web Share Target API
+function handleShareTarget() {
+  const params = new URLSearchParams(window.location.search);
+  const shared = params.get('text') || params.get('title') || params.get('url');
+  if (shared) {
+    sourceText.value = shared;
+    // Clean the URL without reloading
+    history.replaceState(null, '', window.location.pathname);
+    return true;
+  }
+  return false;
+}
+
 // Init
 translator.onStatus = setStatus;
 populateLanguageSelects();
+const hasSharedText = handleShareTarget();
 
 translator.init().then(() => {
   checkLanguageAvailability();
+  if (hasSharedText) scheduleTranslation();
 }).catch(err => {
   setStatus('Failed to load translation engine');
   console.error('Init error:', err);
