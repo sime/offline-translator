@@ -304,6 +304,11 @@ modalOverlay.addEventListener('click', (e) => {
 
 downloadPromptBtn.addEventListener('click', downloadCurrentPair);
 
+// Register service worker
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js');
+}
+
 // Init
 translator.onStatus = setStatus;
 populateLanguageSelects();

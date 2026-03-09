@@ -1,0 +1,15 @@
+{
+  "name": "Offline Translator",
+  "short_name": "Translator",
+  "start_url": "./",
+  "display": "standalone",
+  "theme_color": "#121212",
+  "background_color": "#121212",
+  "icons": [
+    {
+      "src": "../favicon.png",
+      "sizes": "any",
+      "type": "image/png"
+    }
+  ]
+}
