@@ -1,4 +1,4 @@
-<h1><center>Translator</center></h1>
+<h1><center>Translate Fox: Offline Translator</center></h1>
 
 An Android translator app that performs text and image translation completely offline using on-device models.
 
