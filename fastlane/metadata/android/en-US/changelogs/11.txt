@@ -1,0 +1,9 @@
+Translate on-screen text directly via 2 mechanisms:
+
+- Accessibility hooks
+- Device Assistant role
+
+Fix crashes if the default camera is uninstalled.
+
+Lower minimum Android version from 9 to 5.0, add ARMv7 support,
+and remove minimum Android version requirement from transliteration.

@@ -7,6 +7,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -14,19 +15,29 @@ import kotlinx.coroutines.launch
 class AidlTranslationService : Service() {
   private val tag = this.javaClass.name.substringAfterLast('.')
 
+  private lateinit var settingsManager: SettingsManager
   private lateinit var translationCoordinator: TranslationCoordinator
   private lateinit var langStateManager: LanguageStateManager
+  private lateinit var ocrService: OCRService
   private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
   override fun onCreate() {
     super.onCreate()
-    val settingsManager = SettingsManager(this)
+    settingsManager = SettingsManager(this)
     val filePathManager = FilePathManager(this, settingsManager.settings)
-    val translationService = TranslationService(settingsManager, filePathManager)
-    val languageDetector = LanguageDetector()
-    val imageProcessor = ImageProcessor(this, OCRService(filePathManager))
-    translationCoordinator = TranslationCoordinator(this, translationService, languageDetector, imageProcessor, settingsManager, false)
     langStateManager = LanguageStateManager(serviceScope, filePathManager, null)
+    val languageDetector = LanguageDetector(langStateManager::languageByCode)
+    ocrService = OCRService(filePathManager)
+    val imageProcessor = ImageProcessor(this, ocrService)
+
+    serviceScope.launch {
+      langStateManager.catalog.collect { catalog ->
+        if (catalog == null) return@collect
+        val translationService = TranslationService(settingsManager, filePathManager, catalog.english)
+        translationCoordinator = TranslationCoordinator(translationService, languageDetector, imageProcessor, settingsManager)
+        Log.d(tag, "TranslationCoordinator initialized")
+      }
+    }
     Log.d(tag, "onCreate")
   }
 
@@ -50,8 +61,8 @@ class AidlTranslationService : Service() {
           return
         }
 
-        val fromLanguage = fromLanguageStr?.takeIf { it.isNotEmpty() }?.let { lng -> Language.entries.find { it.code == lng } }
-        val toLanguage = toLanguageStr?.takeIf { it.isNotEmpty() }?.let { lng -> Language.entries.find { it.code == lng } }
+        val fromLanguage = fromLanguageStr?.takeIf { it.isNotEmpty() }?.let { langStateManager.languageByCode(it) }
+        val toLanguage = toLanguageStr?.takeIf { it.isNotEmpty() }?.let { langStateManager.languageByCode(it) }
 
         CoroutineScope(Dispatchers.IO).launch {
           langStateManager.languageState.first { !it.isChecking }
@@ -87,7 +98,17 @@ class AidlTranslationService : Service() {
             callback.onTranslationError(err)
             return@launch
           }
-          val to = toLanguage ?: SettingsManager(applicationContext).settings.value.defaultTargetLanguage
+          val to = toLanguage ?: langStateManager.languageByCode(settingsManager.settings.value.defaultTargetLanguageCode)
+          if (to == null) {
+            val err =
+              TranslationError().apply {
+                type = ErrorType.UNEXPECTED
+                language = null
+                message = "Target language not available"
+              }
+            callback.onTranslationError(err)
+            return@launch
+          }
           when (val result = translationCoordinator.translateText(from, to, textToTranslate)) {
             is TranslationResult.Success -> {
               val translatedText = result.result.translated
@@ -126,6 +147,10 @@ class AidlTranslationService : Service() {
 
   override fun onDestroy() {
     Log.d(tag, "onDestroy")
+    if (this::ocrService.isInitialized) {
+      ocrService.cleanup()
+    }
+    serviceScope.cancel()
     super.onDestroy()
   }
 }

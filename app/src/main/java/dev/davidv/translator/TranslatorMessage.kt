@@ -38,6 +38,8 @@ sealed class TranslatorMessage {
 
   data object ShareTranslatedImage : TranslatorMessage()
 
+  data object ToggleJapaneseOcrMode : TranslatorMessage()
+
   data object SwapLanguages : TranslatorMessage()
 
   data object ClearInput : TranslatorMessage()
@@ -53,6 +55,11 @@ sealed class TranslatorMessage {
 
   data class DictionaryLookup(
     val str: String,
+    val language: Language,
+  ) : TranslatorMessage()
+
+  data class SpeakTranslatedText(
+    val text: String,
     val language: Language,
   ) : TranslatorMessage()
 

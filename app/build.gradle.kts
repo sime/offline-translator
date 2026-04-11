@@ -7,6 +7,9 @@ plugins {
   alias(libs.plugins.detekt)
 }
 
+val abiCodes = mapOf("armeabi-v7a" to 1, "arm64-v8a" to 2, "x86" to 3, "x86_64" to 4)
+val defaultDevAbis = listOf("arm64-v8a", "x86_64")
+
 android {
   namespace = "dev.davidv.translator"
   compileSdk = 34
@@ -25,12 +28,26 @@ android {
   }
   defaultConfig {
     applicationId = "dev.davidv.translator"
-    minSdk = 28 // iconv functions need 28?
+    minSdk = 21
     targetSdk = 34
-    versionCode = 8
-    versionName = "0.2.3"
+    versionCode = 11
+    versionName = "0.3.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+
+  splits {
+    abi {
+      isEnable = true
+      reset()
+      val targetAbi = project.findProperty("targetAbi")?.toString()
+      if (targetAbi != null) {
+        include(targetAbi)
+      } else {
+        include(*defaultDevAbis.toTypedArray())
+      }
+      isUniversalApk = false
+    }
   }
 
   buildTypes {
@@ -53,28 +70,6 @@ android {
         "proguard-rules.pro",
       )
     }
-
-    flavorDimensions += listOf("architecture")
-    productFlavors {
-      create("x86_64") {
-        ndk {
-          abiFilters += listOf("x86_64") // armeabi-v7a arm64-v8a
-        }
-        dimension = "architecture"
-      }
-      create("x86") {
-        ndk {
-          abiFilters += listOf("x86")
-        }
-        dimension = "architecture"
-      }
-      create("aarch64") {
-        ndk {
-          abiFilters += listOf("arm64-v8a")
-        }
-        dimension = "architecture"
-      }
-    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -87,111 +82,220 @@ android {
     aidl = true
     compose = true
   }
-}
 
-val bindingsRootDir = "src/main/bindings"
-val jniLibsDir = "../jniLibs"
-val ndk = "${System.getenv("ANDROID_SDK_ROOT")}/ndk/28.0.12674087"
-tasks.register("buildBindingsX86_64") {
-  group = "build"
-  description = "Build Rust bindings library for x86_64"
-
-  doLast {
-    exec {
-      workingDir = file(bindingsRootDir)
-      environment("ANDROID_NDK_ROOT", ndk)
-      environment("ANDROID_NDK_HOME", ndk)
-      commandLine(
-        "cargo",
-        "ndk",
-        "build",
-        "--target",
-        "x86_64",
-        "--release",
-        "--platform",
-        "28",
-        "--link-libcxx-shared",
-        "--output-dir",
-        "../jniLibs",
-      )
+  applicationVariants.all {
+    outputs.all {
+      val output = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
+      val abi = output.getFilter(com.android.build.OutputFile.ABI)
+      if (abi != null) {
+        output.versionCodeOverride = defaultConfig.versionCode!! * 10 + (abiCodes[abi] ?: 0)
+      }
     }
   }
 }
 
-tasks.register("buildBindingsAarch64") {
-  group = "build"
-  description = "Build Rust bindings library for aarch64"
+val bindingsRootDir = file("src/main/bindings")
+val jniLibsRootDir = file("src/main/jniLibs")
+val androidSdkRoot =
+  System.getenv("ANDROID_SDK_ROOT")
+    ?: System.getenv("ANDROID_HOME")
+    ?: throw GradleException("ANDROID_SDK_ROOT or ANDROID_HOME must be set")
+val ndk = "$androidSdkRoot/ndk/28.0.12674087"
+val bindingsAndroidApi = 28
+val onnxRuntimeRootDir = file("../third_party/onnxruntime")
+val onnxRuntimeSourceFingerprint =
+  providers.exec {
+    workingDir = onnxRuntimeRootDir
+    commandLine(
+      "bash",
+      "-lc",
+      """
+        set -euo pipefail
+        if [ ! -e .git ]; then
+          echo missing
+          exit 0
+        fi
+        git rev-parse HEAD
+        git stash create || true
+        git status --short --untracked-files=normal
+        git submodule status --recursive
+        git submodule foreach --quiet --recursive 'printf "%s\n" "${'$'}displaypath"; git rev-parse HEAD; git stash create || true; git status --short --untracked-files=normal'
+      """
+        .trimIndent(),
+    )
+  }
+    .standardOutput
+    .asText
+    .map(String::trim)
 
-  doLast {
-    exec {
-      workingDir = file(bindingsRootDir)
-      environment("ANDROID_NDK_ROOT", ndk)
-      environment("ANDROID_NDK_HOME", ndk)
-      commandLine(
-        "cargo",
-        "ndk",
-        "build",
-        "--target",
-        "arm64-v8a",
-        "--release",
-        "--platform",
-        "28",
-        "--link-libcxx-shared",
-        "--output-dir",
-        "../jniLibs",
-      )
+fun onnxRuntimeBuildDir(abi: String) = file("${layout.buildDirectory.asFile.get()}/onnxruntime/$abi")
+
+fun onnxRuntimeConfigDir(abi: String) = File(onnxRuntimeBuildDir(abi), "Release")
+
+fun onnxRuntimeSharedLibrary(abi: String) = File(onnxRuntimeConfigDir(abi), "libonnxruntime.so")
+
+fun jniLibAbiDir(abi: String) = File(jniLibsRootDir, abi)
+
+val abiToTaskSuffix =
+  mapOf(
+    "arm64-v8a" to "Aarch64",
+    "armeabi-v7a" to "ArmeabiV7a",
+    "x86_64" to "X86_64",
+    "x86" to "X86",
+  )
+
+val abiToCargoTarget =
+  mapOf(
+    "arm64-v8a" to "arm64-v8a",
+    "armeabi-v7a" to "armeabi-v7a",
+    "x86_64" to "x86_64",
+    "x86" to "x86",
+  )
+
+val verifyOnnxRuntimeSources =
+  tasks.register("verifyOnnxRuntimeSources") {
+    group = "verification"
+    description = "Verify the ONNX Runtime source tree is already present"
+    doLast {
+      val buildScript = onnxRuntimeRootDir.resolve("tools/ci_build/build.py")
+      if (!buildScript.isFile) {
+        error(
+          "ONNX Runtime sources are missing at ${onnxRuntimeRootDir.absolutePath}. " +
+            "Initialize submodules before running Gradle.",
+        )
+      }
     }
   }
-}
 
-tasks.register("buildBindingsX86") {
-  group = "build"
-  description = "Build Rust bindings library for x86"
+val abiToOnnxRuntimeTask =
+  abiToCargoTarget.keys.associateWith { abi ->
+    val taskSuffix = abiToTaskSuffix.getValue(abi)
+    val buildTask =
+      tasks.register("buildOnnxRuntime$taskSuffix", Exec::class) {
+        group = "build"
+        description = "Build ONNX Runtime for $abi"
+        dependsOn(verifyOnnxRuntimeSources)
+        workingDir = onnxRuntimeRootDir
+        // The ONNX Runtime checkout includes paths that Gradle cannot fingerprint reliably on CI.
+        // Fingerprint the git state instead so local edits still invalidate the native build.
+        inputs.property("onnxRuntimeSourceFingerprint", onnxRuntimeSourceFingerprint)
+        inputs.property("abi", abi)
+        inputs.property("androidApi", bindingsAndroidApi)
+        inputs.property("androidSdkRoot", androidSdkRoot)
+        inputs.property("androidNdkRoot", ndk)
+        inputs.property("cmakeCppStandard", "20")
+        outputs.file(onnxRuntimeSharedLibrary(abi))
+        commandLine(
+          "python3",
+          "tools/ci_build/build.py",
+          "--build_dir=${onnxRuntimeBuildDir(abi).absolutePath}",
+          "--config=Release",
+          "--update",
+          "--build",
+          "--targets",
+          "onnxruntime",
+          "--skip_tests",
+          "--parallel",
+          "--android",
+          "--android_abi=$abi",
+          "--android_api=$bindingsAndroidApi",
+          "--android_sdk_path=$androidSdkRoot",
+          "--android_ndk_path=$ndk",
+          "--android_cpp_shared",
+          "--build_shared_lib",
+          "--disable_ml_ops",
+          "--disable_generation_ops",
+          "--no_kleidiai",
+          "--no_sve",
+          "--cmake_extra_defines",
+          "CMAKE_CXX_STANDARD=20",
+          "CMAKE_CXX_STANDARD_REQUIRED=ON",
+          "CMAKE_CXX_EXTENSIONS=OFF",
+          "--skip_submodule_sync",
+        )
+      }
 
-  doLast {
-    exec {
-      workingDir = file(bindingsRootDir)
-      environment("ANDROID_NDK_ROOT", ndk)
-      environment("ANDROID_NDK_HOME", ndk)
-      commandLine(
-        "cargo",
-        "ndk",
-        "build",
-        "--target",
-        "x86",
-        "--release",
-        "--platform",
-        "28",
-        "--link-libcxx-shared",
-        "--output-dir",
-        "../jniLibs",
-      )
+    tasks.register("packageOnnxRuntime$taskSuffix", Copy::class) {
+      group = "build"
+      description = "Copy libonnxruntime.so for $abi into jniLibs"
+      dependsOn(buildTask)
+      from(onnxRuntimeSharedLibrary(abi))
+      into(jniLibAbiDir(abi))
     }
   }
+
+val abiToBindingsTask =
+  abiToCargoTarget.mapValues { (abi, cargoTarget) ->
+    val taskSuffix = abiToTaskSuffix.getValue(abi)
+    tasks.register("buildBindings$taskSuffix") {
+      group = "build"
+      description = "Build Rust bindings library for $abi"
+      dependsOn(abiToOnnxRuntimeTask.getValue(abi))
+      inputs.file(bindingsRootDir.resolve("Cargo.toml"))
+      inputs.file(bindingsRootDir.resolve("Cargo.lock"))
+      inputs.file(bindingsRootDir.resolve(".cargo/config.toml"))
+      inputs.dir(bindingsRootDir.resolve("src"))
+      inputs.file(onnxRuntimeSharedLibrary(abi))
+      inputs.property("cargoTarget", cargoTarget)
+      inputs.property("androidApi", bindingsAndroidApi)
+      inputs.property("androidNdkRoot", ndk)
+      outputs.file(File(jniLibAbiDir(abi), "libbindings.so"))
+      outputs.file(File(jniLibAbiDir(abi), "libc++_shared.so"))
+
+      doLast {
+        exec {
+          workingDir = bindingsRootDir
+          environment("ANDROID_NDK_ROOT", ndk)
+          environment("ANDROID_NDK_HOME", ndk)
+          environment("ORT_LIB_LOCATION", onnxRuntimeConfigDir(abi).absolutePath)
+          environment("ORT_PREFER_DYNAMIC_LINK", "1")
+          commandLine(
+            "cargo",
+            "ndk",
+            "build",
+            "--target",
+            cargoTarget,
+            "--release",
+            "--platform",
+            bindingsAndroidApi.toString(),
+            "--link-libcxx-shared",
+            "--output-dir",
+            "../jniLibs",
+          )
+        }
+      }
+    }
+  }
+
+tasks.register("buildOnnxRuntimeAll") {
+  group = "build"
+  description = "Build ONNX Runtime for all architectures"
+  dependsOn(abiToOnnxRuntimeTask.values.toList())
 }
 
 tasks.register("buildBindingsAll") {
   group = "build"
   description = "Build Rust bindings library for all architectures"
-  dependsOn("buildBindingsX86_64", "buildBindingsAarch64", "buildBindingsX86")
+  dependsOn(abiToBindingsTask.values.toList())
 }
 
-tasks.whenTaskAdded {
-  if (name.contains("preAarch64") && name.contains("Build")) {
-    dependsOn("buildBindingsAarch64")
+val targetAbi = project.findProperty("targetAbi")?.toString()
+val bindingsTasks =
+  if (targetAbi != null) {
+    listOfNotNull(abiToBindingsTask[targetAbi])
+  } else {
+    defaultDevAbis.mapNotNull { abiToBindingsTask[it] }
   }
-  if (name.contains("preX86_64") && name.contains("Build")) {
-    dependsOn("buildBindingsX86_64")
-  }
-  if (name.contains("preX86") && name.contains("Build") && !name.contains("preX86_64")) {
-    dependsOn("buildBindingsX86")
-  }
+
+tasks.named("preBuild") {
+  dependsOn(bindingsTasks)
 }
 
 dependencies {
 
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.lifecycle.runtime.ktx)
+  implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.activity.compose)
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.ui)

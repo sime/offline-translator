@@ -17,23 +17,19 @@
 
 package dev.davidv.translator
 
-import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
-import android.widget.Toast
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.system.measureTimeMillis
 
 class TranslationCoordinator(
-  private val context: Context,
   private val translationService: TranslationService,
   private val languageDetector: LanguageDetector,
   private val imageProcessor: ImageProcessor,
   private val settingsManager: SettingsManager,
-  private val enableToast: Boolean = true,
 ) {
   private val _isTranslating = MutableStateFlow(false)
   val isTranslating: StateFlow<Boolean> = _isTranslating.asStateFlow()
@@ -54,9 +50,7 @@ class TranslationCoordinator(
     if (_isTranslating.value) {
       return
     }
-    _isTranslating.value = true
     translationService.preloadModel(from, to)
-    _isTranslating.value = false
   }
 
   suspend fun translateText(
@@ -65,9 +59,6 @@ class TranslationCoordinator(
     text: String,
   ): TranslationResult {
     if (text.isBlank()) return TranslationResult.Success(TranslatedText("", ""))
-    // we do best-effort in TranslatorApp to not call this concurrently,
-    // to avoid pointless queueing (only the latest result is useful)
-    // but it's fine, there's a lock in the cpp code
 
     _isTranslating.value = true
     val result: TranslationResult
@@ -81,20 +72,51 @@ class TranslationCoordinator(
       lastTranslatedInput = text
       _isTranslating.value = false
     }
-    return when (result) {
-      is TranslationResult.Success -> result
-      is TranslationResult.Error -> {
-        if (enableToast) {
-          Toast
-            .makeText(
-              context,
-              "Translation error: ${result.message}",
-              Toast.LENGTH_SHORT,
-            ).show()
+    return result
+  }
+
+  suspend fun translateTexts(
+    from: Language,
+    to: Language,
+    texts: Array<String>,
+  ): BatchTranslationResult {
+    if (texts.isEmpty()) return BatchTranslationResult.Success(emptyList())
+
+    _isTranslating.value = true
+    val result: BatchTranslationResult
+    try {
+      val elapsed =
+        measureTimeMillis {
+          result = translationService.translateMultiple(from, to, texts)
         }
-        result
-      }
+      Log.d("TranslationCoordinator", "Translating ${texts.size} texts from ${from.displayName} to ${to.displayName} took ${elapsed}ms")
+    } finally {
+      lastTranslatedInput = texts.lastOrNull() ?: ""
+      _isTranslating.value = false
     }
+    return result
+  }
+
+  suspend fun translateTextsWithAlignment(
+    from: Language,
+    to: Language,
+    texts: Array<String>,
+  ): BatchAlignedTranslationResult {
+    if (texts.isEmpty()) return BatchAlignedTranslationResult.Success(emptyList())
+
+    _isTranslating.value = true
+    val result: BatchAlignedTranslationResult
+    try {
+      val elapsed =
+        measureTimeMillis {
+          result = translationService.translateMultipleWithAlignment(from, to, texts)
+        }
+      Log.d("TranslationCoordinator", "Aligned translation of ${texts.size} texts took ${elapsed}ms")
+    } finally {
+      lastTranslatedInput = texts.lastOrNull() ?: ""
+      _isTranslating.value = false
+    }
+    return result
   }
 
   suspend fun detectLanguage(
@@ -112,7 +134,6 @@ class TranslationCoordinator(
     val originalBitmap = imageProcessor.loadBitmapFromUri(uri)
     val correctedBitmap = imageProcessor.correctImageOrientation(uri, originalBitmap)
 
-    // Recycle original if it's different from corrected
     if (correctedBitmap !== originalBitmap && !originalBitmap.isRecycled) {
       originalBitmap.recycle()
     }
@@ -120,7 +141,6 @@ class TranslationCoordinator(
     val maxImageSize = settingsManager.settings.value.maxImageSize
     val finalBitmap = imageProcessor.downscaleImage(correctedBitmap, maxImageSize)
 
-    // Recycle corrected if it's different from final
     if (finalBitmap !== correctedBitmap && !correctedBitmap.isRecycled) {
       correctedBitmap.recycle()
     }
@@ -133,12 +153,13 @@ class TranslationCoordinator(
     to: Language,
     finalBitmap: Bitmap,
     onMessage: (TranslatorMessage.ImageTextDetected) -> Unit,
+    readingOrder: ReadingOrder = ReadingOrder.LEFT_TO_RIGHT,
   ): ProcessedImageResult? {
     _isTranslating.value = true
     return try {
       _isOcrInProgress.value = true
       val minConfidence = settingsManager.settings.value.minConfidence
-      val processedImage = imageProcessor.processImage(finalBitmap, from, minConfidence)
+      val processedImage = imageProcessor.processImage(finalBitmap, from, minConfidence, readingOrder)
       _isOcrInProgress.value = false
 
       Log.d("OCR", "complete, result ${processedImage.textBlocks}")
@@ -162,30 +183,34 @@ class TranslationCoordinator(
             }
 
             is BatchTranslationResult.Error -> {
-              Toast
-                .makeText(
-                  context,
-                  "Translation error: ${translationResult.message}",
-                  Toast.LENGTH_SHORT,
-                ).show()
               return null
             }
           }
         }
       Log.i("TranslationCoordinator", "Bulk translation took ${totalTranslateMs}ms")
 
-      // Paint translated text over image
       val overlayBitmap: Bitmap
       val allTranslatedText: String
       val translatePaint =
         measureTimeMillis {
           val pair =
-            paintTranslatedTextOver(
-              processedImage.bitmap,
-              processedImage.textBlocks,
-              translatedBlocks,
-              settingsManager.settings.value.backgroundMode,
-            )
+            when (readingOrder) {
+              ReadingOrder.LEFT_TO_RIGHT ->
+                paintTranslatedTextOver(
+                  processedImage.bitmap,
+                  processedImage.textBlocks,
+                  translatedBlocks,
+                  settingsManager.settings.value.backgroundMode,
+                )
+
+              ReadingOrder.TOP_TO_BOTTOM_LEFT_TO_RIGHT ->
+                paintTranslatedTextOverVerticalBlocks(
+                  processedImage.bitmap,
+                  processedImage.textBlocks,
+                  translatedBlocks,
+                  settingsManager.settings.value.backgroundMode,
+                )
+            }
           overlayBitmap = pair.first
           allTranslatedText = pair.second
         }
@@ -199,11 +224,6 @@ class TranslationCoordinator(
       )
     } catch (e: Exception) {
       Log.e("TranslationCoordinator", "Exception ${e.stackTrace}")
-      if (enableToast) {
-        Toast
-          .makeText(context, "Image processing error: ${e.message}", Toast.LENGTH_SHORT)
-          .show()
-      }
       null
     } finally {
       _isOcrInProgress.value = false
@@ -215,6 +235,11 @@ class TranslationCoordinator(
     text: String,
     from: Language,
   ): String? = translationService.transliterate(text, from)
+
+  suspend fun synthesizeSpeech(
+    language: Language,
+    text: String,
+  ): SpeechSynthesisResult = translationService.synthesizeSpeech(language, text)
 }
 
 data class ProcessedImageResult(

@@ -5,7 +5,14 @@ import android.os.Build
 import android.os.Environment
 import android.util.Log
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONObject
 import java.io.File
+
+data class PiperVoiceFiles(
+  val model: File,
+  val config: File,
+  val speakerId: Int? = null,
+)
 
 class FilePathManager(
   private val context: Context,
@@ -37,35 +44,89 @@ class FilePathManager(
 
   fun getDictionariesDir(): File = File(baseDir, "dictionaries")
 
-  fun getDictionaryFile(language: Language): File = File(getDictionariesDir(), "${language.code}.dict")
+  fun resolveInstallPath(relativePath: String): File = File(baseDir, relativePath)
 
-  fun getDictionaryIndexFile(): File = File(baseDir, "dictionaries/index.json")
+  fun getDictionaryFile(language: Language): File = File(getDictionariesDir(), "${language.dictionaryCode}.dict")
+
+  fun getCatalogFile(): File = File(baseDir, "index.json")
 
   fun getMucabFile(): File = File(getDataDir(), "mucab.bin")
 
-  fun deleteLanguageFiles(language: Language) {
+  fun hasInstallMarker(
+    relativePath: String,
+    expectedVersion: Int,
+  ): Boolean {
+    val markerFile = resolveInstallPath(relativePath)
+    if (!markerFile.exists()) return false
+    return try {
+      val root = JSONObject(markerFile.readText())
+      root.optInt("version", -1) == expectedVersion
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  fun writeInstallMarker(
+    relativePath: String,
+    version: Int,
+  ) {
+    val markerFile = resolveInstallPath(relativePath)
+    markerFile.parentFile?.mkdirs()
+    markerFile.writeText(
+      JSONObject()
+        .put("version", version)
+        .toString(),
+    )
+  }
+
+  fun getPiperVoiceFiles(language: Language): PiperVoiceFiles? {
+    val catalog = loadCatalog() ?: return null
+    val resolver = PackResolver(catalog, this)
+    val voicePackId = catalog.installedTtsPackIdForLanguage(language.code, resolver::isInstalled) ?: return null
+    val voicePack = catalog.pack(voicePackId) ?: return null
+    val configAsset = voicePack.files.firstOrNull { it.name.endsWith(".onnx.json") } ?: return null
+    val modelAsset = voicePack.files.firstOrNull { it.name.endsWith(".onnx") && !it.name.endsWith(".onnx.json") } ?: return null
+    val modelFile = resolveInstallPath(modelAsset.installPath)
+    val configFile = resolveInstallPath(configAsset.installPath)
+
+    return if (modelFile.exists() && configFile.exists()) {
+      PiperVoiceFiles(
+        model = modelFile,
+        config = configFile,
+        speakerId = voicePack.defaultSpeakerId,
+      )
+    } else {
+      null
+    }
+  }
+
+  fun getPiperEspeakDataRoot(): File? {
+    val dataDir = getDataDir()
+    val espeakDataDir = File(dataDir, "espeak-ng-data")
+    return dataDir.takeIf { espeakDataDir.exists() }
+  }
+
+  fun deleteLanguageFiles(
+    language: Language,
+    deleteDictionary: Boolean = true,
+  ) {
     val dataPath = getDataDir()
 
-    // Delete to English files
-    val toEnglishFiles = toEnglishFiles[language]
-    toEnglishFiles?.allFiles()?.forEach { fileName ->
-      val file = File(dataPath, fileName)
+    language.toEnglish?.allFiles()?.forEach { modelFile ->
+      val file = File(dataPath, modelFile.name)
       if (file.exists() && file.delete()) {
-        Log.i("FilePathManager", "Deleted: $fileName")
+        Log.i("FilePathManager", "Deleted: ${modelFile.name}")
       }
     }
 
-    // Delete from English files
-    val fromEnglishFiles = fromEnglishFiles[language]
-    fromEnglishFiles?.allFiles()?.forEach { fileName ->
-      val file = File(dataPath, fileName)
+    language.fromEnglish?.allFiles()?.forEach { modelFile ->
+      val file = File(dataPath, modelFile.name)
       if (file.exists() && file.delete()) {
-        Log.i("FilePathManager", "Deleted: $fileName")
+        Log.i("FilePathManager", "Deleted: ${modelFile.name}")
       }
     }
 
-    // Delete extra files
-    extraFiles[language]?.forEach { fileName ->
+    language.extraFiles.forEach { fileName ->
       val file = File(dataPath, fileName)
       if (file.exists() && file.delete()) {
         Log.i("FilePathManager", "Deleted extra file: $fileName")
@@ -80,43 +141,71 @@ class FilePathManager(
     }
 
     // Delete dictionary file
-    val dictionaryFile = getDictionaryFile(language)
-    if (dictionaryFile.exists() && dictionaryFile.delete()) {
-      Log.i("FilePathManager", "Deleted: ${dictionaryFile.name}")
+    if (deleteDictionary) {
+      val dictionaryFile = getDictionaryFile(language)
+      if (dictionaryFile.exists() && dictionaryFile.delete()) {
+        Log.i("FilePathManager", "Deleted: ${dictionaryFile.name}")
+      }
     }
   }
 
-  fun loadDictionaryIndexFromFile(): DictionaryIndex? {
-    return try {
-      val indexFile = getDictionaryIndexFile()
-      if (!indexFile.exists()) return null
-
-      val jsonString = indexFile.readText()
-      val jsonObject = org.json.JSONObject(jsonString)
-
-      val dictionariesJson = jsonObject.getJSONObject("dictionaries")
-      val dictionaries = mutableMapOf<String, DictionaryInfo>()
-
-      for (key in dictionariesJson.keys()) {
-        val dictJson = dictionariesJson.getJSONObject(key)
-        dictionaries[key] =
-          DictionaryInfo(
-            date = dictJson.getLong("date"),
-            filename = dictJson.getString("filename"),
-            size = dictJson.getLong("size"),
-            type = dictJson.getString("type"),
-            wordCount = dictJson.getLong("word_count"),
-          )
+  fun deletePackFiles(
+    catalog: LanguageCatalog,
+    packIds: Set<String>,
+  ) {
+    packIds.forEach { packId ->
+      val pack = catalog.pack(packId) ?: return@forEach
+      pack.files.forEach { assetFile ->
+        if (assetFile.archiveFormat == "zip") {
+          assetFile.installMarkerPath?.let { markerPath ->
+            val extractionRoot = resolveInstallPath(markerPath).parentFile
+            if (extractionRoot?.exists() == true && extractionRoot.deleteRecursively()) {
+              Log.i("FilePathManager", "Deleted extracted archive dir ${extractionRoot.absolutePath} from $packId")
+            }
+          }
+        }
+        val file = resolveInstallPath(assetFile.installPath)
+        if (file.exists() && file.delete()) {
+          Log.i("FilePathManager", "Deleted ${assetFile.installPath} from $packId")
+        }
       }
-
-      DictionaryIndex(
-        dictionaries = dictionaries,
-        updatedAt = jsonObject.getLong("updated_at"),
-        version = jsonObject.getInt("version"),
-      )
-    } catch (e: Exception) {
-      Log.e("FilePathManager", "Error parsing dictionary index file", e)
-      null
     }
+  }
+
+  fun loadCatalog(): LanguageCatalog? {
+    val diskFile = getCatalogFile()
+    var diskCatalog: LanguageCatalog? = null
+
+    if (diskFile.exists()) {
+      try {
+        diskCatalog = parseAndValidateCatalog(diskFile.readText())
+      } catch (e: Exception) {
+        Log.w("FilePathManager", "Deleting invalid cached catalog: ${diskFile.absolutePath}", e)
+        if (!diskFile.delete()) {
+          Log.w("FilePathManager", "Failed to delete invalid cached catalog: ${diskFile.absolutePath}")
+        }
+      }
+    }
+
+    return try {
+      val jsonString = context.assets.open("index.json").bufferedReader().readText()
+      val bundledCatalog = parseAndValidateCatalog(jsonString)
+      if (diskCatalog != null && diskCatalog.generatedAt >= bundledCatalog.generatedAt) {
+        diskCatalog
+      } else {
+        bundledCatalog
+      }
+    } catch (e: Exception) {
+      Log.e("FilePathManager", "Error parsing bundled catalog index", e)
+      diskCatalog
+    }
+  }
+
+  private fun parseAndValidateCatalog(jsonString: String): LanguageCatalog {
+    val catalog = parseLanguageCatalog(jsonString)
+    require(catalog.formatVersion == 2) {
+      "Unsupported catalog formatVersion=${catalog.formatVersion}"
+    }
+    return catalog
   }
 }

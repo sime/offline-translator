@@ -3,6 +3,9 @@ plugins {
   alias(libs.plugins.kotlin.android)
 }
 
+val defaultAbis = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+val targetAbi = project.findProperty("targetAbi")?.toString()
+
 android {
   namespace = "dev.davidv.bergamot"
   compileSdk = 34
@@ -11,35 +14,16 @@ android {
 
   defaultConfig {
 
-    minSdk = 28 // iconv requirements from pathie-cpp
+    minSdk = 21
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     consumerProguardFiles("consumer-rules.pro")
+    ndk {
+      abiFilters += if (targetAbi != null) listOf(targetAbi) else defaultAbis
+    }
     externalNativeBuild {
       cmake {
         cppFlags("-std=c++17")
       }
-    }
-  }
-
-  flavorDimensions += listOf("architecture")
-  productFlavors {
-    create("x86_64") {
-      ndk {
-        abiFilters += listOf("x86_64")
-      }
-      dimension = "architecture"
-    }
-    create("x86") {
-      ndk {
-        abiFilters += listOf("x86")
-      }
-      dimension = "architecture"
-    }
-    create("aarch64") {
-      ndk {
-        abiFilters += listOf("arm64-v8a")
-      }
-      dimension = "architecture"
     }
   }
 

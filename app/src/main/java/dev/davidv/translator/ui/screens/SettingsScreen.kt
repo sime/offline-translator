@@ -17,6 +17,11 @@
 
 package dev.davidv.translator.ui.screens
 
+import android.app.role.RoleManager
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -54,11 +59,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import dev.davidv.translator.AppSettings
 import dev.davidv.translator.BackgroundMode
 import dev.davidv.translator.Language
+import dev.davidv.translator.LanguageCatalog
 import dev.davidv.translator.LanguageMetadataManager
 import dev.davidv.translator.PermissionHelper
 import dev.davidv.translator.R
@@ -121,11 +128,13 @@ fun SettingsScreen(
   settings: AppSettings,
   languageMetadataManager: dev.davidv.translator.LanguageMetadataManager,
   availableLanguages: List<Language>,
+  catalog: LanguageCatalog?,
   onSettingsChange: (AppSettings) -> Unit,
   onManageLanguages: () -> Unit,
 ) {
   val context = LocalContext.current
   var showPermissionDialog by remember { mutableStateOf(false) }
+  var assistantRoleHeld by remember { mutableStateOf(isAssistantRoleHeld(context)) }
 
   val permissionLauncher =
     rememberLauncherForActivityResult(
@@ -145,6 +154,13 @@ fun SettingsScreen(
     ) { _ ->
       val gotPerms = PermissionHelper.hasExternalStoragePermission(context)
       onSettingsChange(settings.copy(useExternalStorage = gotPerms))
+    }
+
+  val assistantRoleLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.StartActivityForResult(),
+    ) { _ ->
+      assistantRoleHeld = isAssistantRoleHeld(context)
     }
   Scaffold(
     topBar = {
@@ -221,21 +237,21 @@ fun SettingsScreen(
 
           LanguageDropdown(
             label = "Default 'from' language",
-            selectedLanguage = settings.defaultSourceLanguage,
+            selectedLanguage = settings.defaultSourceLanguageCode?.let { catalog?.languageByCode(it) },
             availableLanguages = availableLanguages,
-            fallbackLanguage = availableLanguages.firstOrNull { it != settings.defaultTargetLanguage },
+            fallbackLanguage = availableLanguages.firstOrNull { it.code != settings.defaultTargetLanguageCode },
             onLanguageSelected = { language ->
-              onSettingsChange(settings.copy(defaultSourceLanguage = language))
+              onSettingsChange(settings.copy(defaultSourceLanguageCode = language.code))
             },
           )
 
           LanguageDropdown(
             label = "Default 'to' language",
-            selectedLanguage = settings.defaultTargetLanguage,
+            selectedLanguage = catalog?.languageByCode(settings.defaultTargetLanguageCode),
             availableLanguages = availableLanguages,
             fallbackLanguage = null,
             onLanguageSelected = { language ->
-              onSettingsChange(settings.copy(defaultTargetLanguage = language))
+              onSettingsChange(settings.copy(defaultTargetLanguageCode = language.code))
             },
           )
 
@@ -277,6 +293,98 @@ fun SettingsScreen(
               maxLines = 1,
               overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
+          }
+        }
+      }
+
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors =
+          CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+          ),
+      ) {
+        Column(
+          modifier = Modifier.padding(16.dp),
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          Text(
+            text = "Screen translation",
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.primary,
+          )
+
+          Text(
+            text =
+              "Translate text directly on top of other apps.\n" +
+                "Tech preview, expect bugs.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text(
+                text = "Device Assistant",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+              )
+              Text(
+                text =
+                  "Requires assistant gesture.\n" +
+                    "Higher quality.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+
+            TextButton(
+              onClick = {
+                if (shouldLaunchAssistantRoleRequest(context)) {
+                  val roleManager = context.getSystemService(RoleManager::class.java) ?: return@TextButton
+                  assistantRoleLauncher.launch(
+                    roleManager.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT),
+                  )
+                } else {
+                  openAssistantSettings(context)
+                }
+              },
+            ) {
+              Text(if (assistantRoleHeld) "Manage" else "Request")
+            }
+          }
+
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text(
+                text = "Floating shortcut",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+              )
+              Text(
+                text =
+                  "Requires accessibility permissions\n" +
+                    "Quality depends on target app.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+
+            TextButton(
+              onClick = {
+                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+              },
+            ) {
+              Text("Manage")
+            }
           }
         }
       }
@@ -425,15 +533,15 @@ fun SettingsScreen(
             )
 
             OutlinedTextField(
-              value = settings.translationModelsBaseUrl,
+              value = settings.translationModelsBaseUrl ?: "",
               onValueChange = {
-                onSettingsChange(settings.copy(translationModelsBaseUrl = it))
+                onSettingsChange(settings.copy(translationModelsBaseUrl = it.ifBlank { null }))
               },
+              placeholder = { Text(catalog?.translationModelsBaseUrl ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis) },
               modifier = Modifier.fillMaxWidth(),
               singleLine = true,
             )
 
-            // Tesseract Models Base URL
             Text(
               text = "Base URL for Tesseract Models",
               style = MaterialTheme.typography.bodyMedium,
@@ -441,10 +549,11 @@ fun SettingsScreen(
             )
 
             OutlinedTextField(
-              value = settings.tesseractModelsBaseUrl,
+              value = settings.tesseractModelsBaseUrl ?: "",
               onValueChange = {
-                onSettingsChange(settings.copy(tesseractModelsBaseUrl = it))
+                onSettingsChange(settings.copy(tesseractModelsBaseUrl = it.ifBlank { null }))
               },
+              placeholder = { Text(catalog?.tesseractModelsBaseUrl ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis) },
               modifier = Modifier.fillMaxWidth(),
               singleLine = true,
             )
@@ -687,15 +796,76 @@ fun SettingsScreen(
   }
 }
 
+private fun isAssistantRoleHeld(context: android.content.Context): Boolean {
+  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+  val roleManager = context.getSystemService(RoleManager::class.java) ?: return false
+  if (!roleManager.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) return false
+  return roleManager.isRoleHeld(RoleManager.ROLE_ASSISTANT)
+}
+
+private fun shouldLaunchAssistantRoleRequest(context: Context): Boolean {
+  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+  if (getConfiguredAssistant(context).isNullOrBlank()) return false
+  val roleManager = context.getSystemService(RoleManager::class.java) ?: return false
+  return roleManager.isRoleAvailable(RoleManager.ROLE_ASSISTANT) &&
+    !roleManager.isRoleHeld(RoleManager.ROLE_ASSISTANT)
+}
+
+private fun getConfiguredAssistant(context: Context): String? =
+  Settings.Secure
+    .getString(context.contentResolver, ASSISTANT_SETTING)
+    ?.takeIf { it.isNotBlank() }
+
+private fun openAssistantSettings(context: Context) {
+  val settingsIntents =
+    listOf(
+      Intent(Settings.ACTION_VOICE_INPUT_SETTINGS),
+      Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
+      Intent(Settings.ACTION_SETTINGS),
+    )
+
+  settingsIntents
+    .firstOrNull { intent ->
+      intent.resolveActivity(context.packageManager) != null
+    }?.let { intent ->
+      context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
+private const val ASSISTANT_SETTING = "assistant"
+
+private fun previewLanguage(
+  code: String,
+  name: String,
+) = Language(
+  code = code,
+  displayName = name,
+  shortDisplayName = name,
+  tessName = code,
+  script = "Latn",
+  dictionaryCode = code,
+  tessdataSizeBytes = 0,
+  toEnglish = null,
+  fromEnglish = null,
+  extraFiles = emptyList(),
+)
+
 @Preview(showBackground = true)
 @Composable
 fun SettingsScreenPreview() {
   val context = LocalContext.current
+  val previewLangs =
+    listOf(
+      previewLanguage("en", "English"),
+      previewLanguage("es", "Spanish"),
+      previewLanguage("fr", "French"),
+    )
   TranslatorTheme {
     SettingsScreen(
       settings = AppSettings(),
-      languageMetadataManager = LanguageMetadataManager(context),
-      availableLanguages = Language.entries,
+      languageMetadataManager = LanguageMetadataManager(context, kotlinx.coroutines.flow.MutableStateFlow(emptyList())),
+      availableLanguages = previewLangs,
+      catalog = null,
       onSettingsChange = {},
       onManageLanguages = {},
     )
@@ -709,11 +879,18 @@ fun SettingsScreenPreview() {
 @Composable
 fun SettingsScreenDarkPreview() {
   val context = LocalContext.current
+  val previewLangs =
+    listOf(
+      previewLanguage("en", "English"),
+      previewLanguage("es", "Spanish"),
+      previewLanguage("fr", "French"),
+    )
   TranslatorTheme {
     SettingsScreen(
       settings = AppSettings(fontFactor = 3.0f),
-      languageMetadataManager = LanguageMetadataManager(context),
-      availableLanguages = Language.entries,
+      languageMetadataManager = LanguageMetadataManager(context, kotlinx.coroutines.flow.MutableStateFlow(emptyList())),
+      availableLanguages = previewLangs,
+      catalog = null,
       onSettingsChange = {},
       onManageLanguages = {},
     )

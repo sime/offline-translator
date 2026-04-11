@@ -1,0 +1,987 @@
+/*
+ * Copyright (C) 2024 David V
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package dev.davidv.translator.ui.screens
+
+import android.content.Context
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import dev.davidv.translator.DictionaryInfo
+import dev.davidv.translator.DownloadService
+import dev.davidv.translator.DownloadState
+import dev.davidv.translator.LangAvailability
+import dev.davidv.translator.Language
+import dev.davidv.translator.LanguageAvailabilityState
+import dev.davidv.translator.LanguageCatalog
+import dev.davidv.translator.LanguageMetadata
+import dev.davidv.translator.LanguageMetadataManager
+import dev.davidv.translator.LanguageStateManager
+import dev.davidv.translator.R
+import kotlin.math.roundToInt
+
+private const val ROW_EXPAND_ANIMATION_MS = 140
+
+private sealed class FavoriteEvent {
+  data class Star(
+    val language: Language,
+  ) : FavoriteEvent()
+
+  data class Unstar(
+    val language: Language,
+  ) : FavoriteEvent()
+}
+
+private data class PendingSharedDictionaryDelete(
+  val language: Language,
+  val sharedWith: List<Language>,
+  val deleteLanguage: Boolean,
+  val deleteTts: Boolean,
+)
+
+private data class PendingTtsVoicePicker(
+  val language: Language,
+)
+
+@Composable
+private fun FavoriteButton(
+  isFavorite: Boolean,
+  language: Language,
+  onEvent: (FavoriteEvent) -> Unit,
+) {
+  IconButton(
+    onClick = {
+      if (isFavorite) {
+        onEvent(FavoriteEvent.Unstar(language))
+      } else {
+        onEvent(FavoriteEvent.Star(language))
+      }
+    },
+    modifier = Modifier.size(32.dp),
+  ) {
+    Icon(
+      painter = painterResource(id = if (isFavorite) R.drawable.star_filled else R.drawable.star),
+      contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+      tint = if (isFavorite) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+      modifier = Modifier.size(18.dp),
+    )
+  }
+}
+
+private data class LanguageFeatureRow(
+  val label: String,
+  val secondaryLabel: String? = null,
+  val installed: Boolean,
+  val downloadState: DownloadState?,
+  val onDownload: () -> Unit,
+  val onDelete: () -> Unit,
+  val onCancel: () -> Unit,
+)
+
+private data class LanguageAssetRow(
+  val language: Language,
+  val availability: LangAvailability,
+  val dictionaryInfo: DictionaryInfo?,
+  val translationVisible: Boolean,
+  val dictionaryVisible: Boolean,
+  val ttsVisible: Boolean,
+  val ttsSizeBytes: Long,
+) {
+  val translationInstalled: Boolean get() = translationVisible && availability.translatorFiles
+  val dictionaryInstalled: Boolean get() = dictionaryVisible && availability.dictionaryFiles
+  val ttsInstalled: Boolean get() = ttsVisible && availability.ttsFiles
+  val visibleFeatureCount: Int get() = listOf(translationVisible, dictionaryVisible, ttsVisible).count { it }
+  val installedFeatureCount: Int get() = listOf(translationInstalled, dictionaryInstalled, ttsInstalled).count { it }
+  val fullyInstalled: Boolean get() = visibleFeatureCount > 0 && installedFeatureCount == visibleFeatureCount
+  val fullyMissing: Boolean get() = installedFeatureCount == 0
+  val partiallyInstalled: Boolean get() = installedFeatureCount in 1 until visibleFeatureCount
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LanguageAssetManagerScreen(
+  context: Context,
+  languageStateManager: LanguageStateManager,
+  languageMetadataManager: LanguageMetadataManager,
+  catalog: LanguageCatalog?,
+  languageAvailabilityState: LanguageAvailabilityState,
+  downloadStates: Map<Language, DownloadState>,
+  dictionaryDownloadStates: Map<Language, DownloadState>,
+  ttsDownloadStates: Map<Language, DownloadState>,
+) {
+  val languageMetadata by languageMetadataManager.metadata.collectAsState()
+  val expandedLanguages = remember { mutableStateMapOf<String, Boolean>() }
+  var isRefreshing by remember { mutableStateOf(false) }
+  var filterQuery by remember { mutableStateOf("") }
+  var pendingSharedDictionaryDelete by remember { mutableStateOf<PendingSharedDictionaryDelete?>(null) }
+  var pendingTtsVoicePicker by remember { mutableStateOf<PendingTtsVoicePicker?>(null) }
+  val catalogRefreshToken by languageStateManager.catalogRefreshToken.collectAsState()
+
+  LaunchedEffect(catalogRefreshToken) {
+    isRefreshing = false
+  }
+
+  val normalizedFilter = filterQuery.trim().lowercase()
+  val rows =
+    catalog
+      ?.languageList
+      ?.sortedBy { it.displayName }
+      ?.mapNotNull { language ->
+        val availability = languageAvailabilityState.availableLanguageMap[language] ?: LangAvailability(false, false, false, false)
+        val dictInfo = catalog.dictionaryInfoFor(language)
+        val translationVisible = !language.isEnglish
+        val dictionaryVisible = dictInfo != null
+        val ttsVisible = catalog.defaultTtsPackIdForLanguage(language.code) != null
+        if (!translationVisible && !dictionaryVisible && !ttsVisible) {
+          null
+        } else {
+          LanguageAssetRow(
+            language = language,
+            availability = availability,
+            dictionaryInfo = dictInfo,
+            translationVisible = translationVisible,
+            dictionaryVisible = dictionaryVisible,
+            ttsVisible = ttsVisible,
+            ttsSizeBytes = catalog.ttsSizeBytesForLanguage(language.code),
+          )
+        }
+      }?.filter { row ->
+        if (normalizedFilter.isBlank()) {
+          true
+        } else {
+          val language = row.language
+          val haystack =
+            listOf(language.displayName, language.shortDisplayName, language.code)
+              .joinToString(" ")
+              .lowercase()
+          normalizedFilter in haystack
+        }
+      }
+      ?: emptyList()
+
+  Scaffold(
+    modifier =
+      Modifier
+        .fillMaxSize()
+        .imePadding(),
+    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+  ) { scaffoldPaddingValues ->
+    PullToRefreshBox(
+      isRefreshing = isRefreshing,
+      onRefresh = {
+        isRefreshing = true
+        DownloadService.fetchCatalog(context)
+      },
+      modifier =
+        Modifier
+          .fillMaxSize()
+          .padding(scaffoldPaddingValues),
+    ) {
+      Column(
+        modifier =
+          Modifier
+            .fillMaxSize()
+            .padding(horizontal = 12.dp),
+      ) {
+        OutlinedTextField(
+          value = filterQuery,
+          onValueChange = { filterQuery = it },
+          modifier =
+            Modifier
+              .fillMaxWidth()
+              .padding(top = 2.dp, bottom = 6.dp),
+          singleLine = true,
+          label = { Text("Filter languages") },
+        )
+
+        LazyColumn(
+          modifier = Modifier.fillMaxSize(),
+        ) {
+          itemsIndexed(rows, key = { _, row -> row.language.code }) { index, row ->
+            val expanded = expandedLanguages[row.language.code] == true
+            val rowTtsPackIds = catalog?.ttsPackIdsForLanguage(row.language.code).orEmpty()
+            val sharedDictionaryUsers =
+              rows
+                .filter { other ->
+                  other.language.code != row.language.code &&
+                    other.dictionaryInstalled &&
+                    other.language.dictionaryCode == row.language.dictionaryCode
+                }.map { it.language }
+                .sortedBy { it.displayName }
+            LanguageAssetCard(
+              row = row,
+              zebra = index % 2 == 1,
+              expanded = expanded,
+              isFavorite = languageMetadata[row.language]?.favorite ?: false,
+              translationDownloadState = downloadStates[row.language],
+              dictionaryDownloadState = dictionaryDownloadStates[row.language],
+              ttsDownloadState = ttsDownloadStates[row.language],
+              onToggleExpanded = {
+                expandedLanguages[row.language.code] = !expanded
+              },
+              onFavorite = { event ->
+                when (event) {
+                  is FavoriteEvent.Star -> {
+                    val current = languageMetadata[event.language] ?: LanguageMetadata()
+                    languageMetadataManager.updateLanguage(event.language, current.copy(favorite = true))
+                  }
+
+                  is FavoriteEvent.Unstar -> {
+                    val current = languageMetadata[event.language] ?: LanguageMetadata()
+                    languageMetadataManager.updateLanguage(event.language, current.copy(favorite = false))
+                  }
+                }
+              },
+              onDownloadTranslation = {
+                DownloadService.startDownload(context, row.language)
+              },
+              onDeleteTranslation = {
+                languageStateManager.deleteLanguage(row.language)
+              },
+              onCancelTranslation = {
+                DownloadService.cancelDownload(context, row.language)
+              },
+              onDownloadDictionary = {
+                DownloadService.startDictDownload(context, row.language, row.dictionaryInfo)
+              },
+              onDeleteDictionary = {
+                if (sharedDictionaryUsers.isNotEmpty()) {
+                  pendingSharedDictionaryDelete =
+                    PendingSharedDictionaryDelete(
+                      language = row.language,
+                      sharedWith = sharedDictionaryUsers,
+                      deleteLanguage = false,
+                      deleteTts = false,
+                    )
+                } else {
+                  languageStateManager.deleteDict(row.language)
+                }
+              },
+              onCancelDictionary = {
+                DownloadService.cancelDictDownload(context, row.language)
+              },
+              onDownloadTts = {
+                val onlyVoicePackId = rowTtsPackIds.singleOrNull()
+                if (onlyVoicePackId != null) {
+                  DownloadService.startTtsDownload(context, row.language, onlyVoicePackId)
+                } else {
+                  pendingTtsVoicePicker = PendingTtsVoicePicker(row.language)
+                }
+              },
+              onDeleteTts = {
+                languageStateManager.deleteTts(row.language)
+              },
+              onCancelTts = {
+                DownloadService.cancelTtsDownload(context, row.language)
+              },
+              onDownloadAll = {
+                if (row.translationVisible && !row.translationInstalled) {
+                  DownloadService.startDownload(context, row.language)
+                }
+                if (row.dictionaryVisible && !row.dictionaryInstalled) {
+                  DownloadService.startDictDownload(context, row.language, row.dictionaryInfo)
+                }
+                if (row.ttsVisible && !row.ttsInstalled) {
+                  DownloadService.startTtsDownload(context, row.language)
+                }
+              },
+              onDeleteAll = {
+                if (row.dictionaryInstalled && sharedDictionaryUsers.isNotEmpty()) {
+                  pendingSharedDictionaryDelete =
+                    PendingSharedDictionaryDelete(
+                      language = row.language,
+                      sharedWith = sharedDictionaryUsers,
+                      deleteLanguage = row.translationInstalled,
+                      deleteTts = row.ttsInstalled,
+                    )
+                } else {
+                  if (row.translationInstalled) {
+                    languageStateManager.deleteLanguage(row.language)
+                  }
+                  if (row.ttsInstalled) {
+                    languageStateManager.deleteTts(row.language)
+                  }
+                  if (row.dictionaryInstalled) {
+                    languageStateManager.deleteDict(row.language)
+                  }
+                }
+              },
+              onCancelAll = {
+                if (downloadStates[row.language]?.isDownloading == true) {
+                  DownloadService.cancelDownload(context, row.language)
+                }
+                if (dictionaryDownloadStates[row.language]?.isDownloading == true) {
+                  DownloadService.cancelDictDownload(context, row.language)
+                }
+                if (ttsDownloadStates[row.language]?.isDownloading == true) {
+                  DownloadService.cancelTtsDownload(context, row.language)
+                }
+              },
+            )
+          }
+        }
+      }
+    }
+  }
+
+  pendingSharedDictionaryDelete?.let { pendingDelete ->
+    val sharedNames = pendingDelete.sharedWith.joinToString(", ") { it.displayName }
+    AlertDialog(
+      onDismissRequest = { pendingSharedDictionaryDelete = null },
+      title = { Text("Delete shared dictionary?") },
+      text = {
+        Text(
+          "This dictionary is shared with $sharedNames.\nDeleting it will remove the dictionary for all of them.",
+        )
+      },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            if (pendingDelete.deleteLanguage) {
+              languageStateManager.deleteLanguage(pendingDelete.language)
+            }
+            if (pendingDelete.deleteTts) {
+              languageStateManager.deleteTts(pendingDelete.language)
+            }
+            languageStateManager.deleteDict(pendingDelete.language)
+            pendingSharedDictionaryDelete = null
+          },
+        ) {
+          Text("OK")
+        }
+      },
+      dismissButton = {
+        TextButton(
+          onClick = { pendingSharedDictionaryDelete = null },
+        ) {
+          Text("Cancel")
+        }
+      },
+    )
+  }
+
+  pendingTtsVoicePicker?.let { pendingPicker ->
+    val pickerCatalog = catalog ?: return@let
+    val regions = pickerCatalog.orderedTtsRegionsForLanguage(pendingPicker.language.code)
+    val showRegionHeaders = regions.size > 1
+    val scrollState = rememberScrollState()
+    AlertDialog(
+      onDismissRequest = { pendingTtsVoicePicker = null },
+      title = { Text("Pick a voice") },
+      text = {
+        Column(
+          modifier = Modifier.verticalScroll(scrollState),
+          verticalArrangement = Arrangement.spacedBy(if (showRegionHeaders) 16.dp else 8.dp),
+        ) {
+          regions.forEach { (_, region) ->
+            Column(
+              verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              if (showRegionHeaders) {
+                Text(
+                  text = region.displayName,
+                  style = MaterialTheme.typography.labelLarge,
+                  fontWeight = FontWeight.SemiBold,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+
+              Column(
+                modifier = Modifier.padding(start = if (showRegionHeaders) 12.dp else 0.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+              ) {
+                region.voices.forEach { packId ->
+                  val pack = pickerCatalog.pack(packId) ?: return@forEach
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                  ) {
+                    Column(
+                      modifier = Modifier.weight(1f),
+                      verticalArrangement = Arrangement.spacedBy(1.dp),
+                    ) {
+                      Text(
+                        text = formatVoiceName(pack.voice ?: pack.id),
+                        style = MaterialTheme.typography.bodyMedium,
+                      )
+                      Text(
+                        text = "${formatSize(pickerCatalog.packSizeBytes(packId))}, ${formatQualityLabel(pack.quality)} quality",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                      )
+                    }
+                    IconButton(
+                      onClick = {
+                        DownloadService.startTtsDownload(context, pendingPicker.language, packId)
+                        pendingTtsVoicePicker = null
+                      },
+                      modifier = Modifier.size(32.dp),
+                    ) {
+                      Icon(
+                        painter = painterResource(id = R.drawable.add),
+                        contentDescription = "Download voice",
+                        modifier = Modifier.size(18.dp),
+                      )
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      confirmButton = {},
+      dismissButton = {
+        TextButton(onClick = { pendingTtsVoicePicker = null }) {
+          Text("Cancel")
+        }
+      },
+    )
+  }
+}
+
+@Composable
+private fun LanguageAssetCard(
+  row: LanguageAssetRow,
+  zebra: Boolean,
+  expanded: Boolean,
+  isFavorite: Boolean,
+  translationDownloadState: DownloadState?,
+  dictionaryDownloadState: DownloadState?,
+  ttsDownloadState: DownloadState?,
+  onToggleExpanded: () -> Unit,
+  onFavorite: (FavoriteEvent) -> Unit,
+  onDownloadTranslation: () -> Unit,
+  onDeleteTranslation: () -> Unit,
+  onCancelTranslation: () -> Unit,
+  onDownloadDictionary: () -> Unit,
+  onDeleteDictionary: () -> Unit,
+  onCancelDictionary: () -> Unit,
+  onDownloadTts: () -> Unit,
+  onDeleteTts: () -> Unit,
+  onCancelTts: () -> Unit,
+  onDownloadAll: () -> Unit,
+  onDeleteAll: () -> Unit,
+  onCancelAll: () -> Unit,
+) {
+  val featureRows =
+    buildFeatureRows(
+      row = row,
+      translationDownloadState = translationDownloadState,
+      dictionaryDownloadState = dictionaryDownloadState,
+      ttsDownloadState = ttsDownloadState,
+      onDownloadTranslation = onDownloadTranslation,
+      onDeleteTranslation = onDeleteTranslation,
+      onCancelTranslation = onCancelTranslation,
+      onDownloadDictionary = onDownloadDictionary,
+      onDeleteDictionary = onDeleteDictionary,
+      onCancelDictionary = onCancelDictionary,
+      onDownloadTts = onDownloadTts,
+      onDeleteTts = onDeleteTts,
+      onCancelTts = onCancelTts,
+    )
+  val totalVisibleSize =
+    (if (row.translationVisible) row.language.sizeBytes else 0L) +
+      (if (row.dictionaryVisible) row.dictionaryInfo?.size ?: 0L else 0L) +
+      (if (row.ttsVisible) row.ttsSizeBytes else 0L)
+  val collapsedDownloadState =
+    when {
+      row.fullyMissing -> translationDownloadState ?: dictionaryDownloadState ?: ttsDownloadState
+      row.fullyInstalled -> null
+      else -> null
+    }
+  val clusterToStarSpacing =
+    if (expanded || row.partiallyInstalled) {
+      8.dp
+    } else {
+      2.dp
+    }
+
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(
+          if (zebra) {
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.035f)
+          } else {
+            Color.Transparent
+          },
+        )
+        .animateContentSize(animationSpec = tween(durationMillis = ROW_EXPAND_ANIMATION_MS))
+        .padding(vertical = 1.dp),
+  ) {
+    Row(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .clickable { onToggleExpanded() }
+          .padding(vertical = 1.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      IconButton(
+        onClick = onToggleExpanded,
+        modifier = Modifier.size(28.dp),
+      ) {
+        Icon(
+          painter = painterResource(id = if (expanded) R.drawable.expandless else R.drawable.expandmore),
+          contentDescription = if (expanded) "Collapse" else "Expand",
+          modifier = Modifier.size(18.dp),
+        )
+      }
+
+      Column(
+        modifier = Modifier.weight(1f),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+      ) {
+        Text(
+          text = row.language.displayName,
+          style = MaterialTheme.typography.bodyLarge,
+          fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          text = formatSize(totalVisibleSize),
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.End,
+      ) {
+        Box(
+          modifier = Modifier.width(60.dp),
+          contentAlignment = Alignment.CenterEnd,
+        ) {
+          when {
+            expanded || row.partiallyInstalled -> {
+              FeaturePresenceIndicators(row)
+            }
+
+            else -> {
+              AggregateActionButton(
+                downloadState = collapsedDownloadState,
+                isInstalled = row.fullyInstalled,
+                onDownload = onDownloadAll,
+                onDelete = onDeleteAll,
+                onCancel = onCancelAll,
+              )
+            }
+          }
+        }
+
+        Spacer(modifier = Modifier.width(clusterToStarSpacing))
+
+        FavoriteButton(
+          isFavorite = isFavorite,
+          language = row.language,
+          onEvent = onFavorite,
+        )
+      }
+    }
+
+    AnimatedVisibility(
+      visible = expanded,
+      enter = expandVertically(animationSpec = tween(ROW_EXPAND_ANIMATION_MS)) + fadeIn(animationSpec = tween(ROW_EXPAND_ANIMATION_MS)),
+      exit = shrinkVertically(animationSpec = tween(ROW_EXPAND_ANIMATION_MS)) + fadeOut(animationSpec = tween(ROW_EXPAND_ANIMATION_MS / 2)),
+    ) {
+      Column(
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .padding(start = 28.dp, end = 0.dp, bottom = 1.dp),
+      ) {
+        featureRows.forEach { featureRow ->
+          FeatureRow(featureRow)
+        }
+      }
+    }
+  }
+}
+
+private fun buildFeatureRows(
+  row: LanguageAssetRow,
+  translationDownloadState: DownloadState?,
+  dictionaryDownloadState: DownloadState?,
+  ttsDownloadState: DownloadState?,
+  onDownloadTranslation: () -> Unit,
+  onDeleteTranslation: () -> Unit,
+  onCancelTranslation: () -> Unit,
+  onDownloadDictionary: () -> Unit,
+  onDeleteDictionary: () -> Unit,
+  onCancelDictionary: () -> Unit,
+  onDownloadTts: () -> Unit,
+  onDeleteTts: () -> Unit,
+  onCancelTts: () -> Unit,
+): List<LanguageFeatureRow> {
+  val featureRows = mutableListOf<LanguageFeatureRow>()
+
+  if (row.translationVisible) {
+    featureRows +=
+      LanguageFeatureRow(
+        label = "Translation",
+        secondaryLabel = formatSize(row.language.sizeBytes),
+        installed = row.translationInstalled,
+        downloadState = translationDownloadState,
+        onDownload = onDownloadTranslation,
+        onDelete = onDeleteTranslation,
+        onCancel = onCancelTranslation,
+      )
+  }
+
+  if (row.dictionaryVisible) {
+    featureRows +=
+      LanguageFeatureRow(
+        label = "Dictionary",
+        secondaryLabel =
+          buildDictionarySecondaryLabel(
+            sizeBytes = row.dictionaryInfo?.size ?: 0L,
+            type = row.dictionaryInfo?.type,
+          ),
+        installed = row.dictionaryInstalled,
+        downloadState = dictionaryDownloadState,
+        onDownload = onDownloadDictionary,
+        onDelete = onDeleteDictionary,
+        onCancel = onCancelDictionary,
+      )
+  }
+
+  if (row.ttsVisible) {
+    featureRows +=
+      LanguageFeatureRow(
+        label = "Text-to-speech",
+        secondaryLabel = formatSize(row.ttsSizeBytes),
+        installed = row.ttsInstalled,
+        downloadState = ttsDownloadState,
+        onDownload = onDownloadTts,
+        onDelete = onDeleteTts,
+        onCancel = onCancelTts,
+      )
+  }
+
+  return featureRows
+}
+
+@Composable
+private fun FeatureRow(featureRow: LanguageFeatureRow) {
+  Row(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .padding(vertical = 0.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Row(
+      modifier = Modifier.weight(1f),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+      Text(
+        text = featureRow.label,
+        style = MaterialTheme.typography.bodyMedium,
+      )
+      featureRow.secondaryLabel?.let { secondaryLabel ->
+        Text(
+          text = secondaryLabel,
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+        )
+      }
+    }
+    FeatureActionButton(
+      downloadState = featureRow.downloadState,
+      isInstalled = featureRow.installed,
+      onDownload = featureRow.onDownload,
+      onDelete = featureRow.onDelete,
+      onCancel = featureRow.onCancel,
+    )
+  }
+}
+
+@Composable
+private fun FeaturePresenceIndicators(row: LanguageAssetRow) {
+  val installedTint = MaterialTheme.colorScheme.onSurface
+  val missingTint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.30f)
+
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    if (row.translationVisible) {
+      Text(
+        text = "T",
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = FontWeight.Bold,
+        color =
+          if (row.translationInstalled) {
+            installedTint
+          } else {
+            missingTint
+          },
+      )
+    }
+
+    if (row.dictionaryVisible) {
+      Icon(
+        painter = painterResource(id = R.drawable.dictionary),
+        contentDescription = "Dictionary Status",
+        tint =
+          if (row.dictionaryInstalled) {
+            installedTint
+          } else {
+            missingTint
+          },
+        modifier = Modifier.size(20.dp),
+      )
+    }
+
+    if (row.ttsVisible) {
+      Icon(
+        painter = painterResource(id = R.drawable.volume_up),
+        contentDescription = "Text-to-speech Status",
+        tint =
+          if (row.ttsInstalled) {
+            installedTint
+          } else {
+            missingTint
+          },
+        modifier =
+          Modifier
+            .size(22.dp)
+            .offset { IntOffset(1, 0) },
+      )
+    }
+  }
+}
+
+@Composable
+private fun AggregateActionButton(
+  downloadState: DownloadState?,
+  isInstalled: Boolean,
+  onDownload: () -> Unit,
+  onDelete: () -> Unit,
+  onCancel: () -> Unit,
+) {
+  if (downloadState?.isDownloading == true) {
+    ProgressIconButton(
+      downloadState = downloadState,
+      onClick = onCancel,
+      contentDescription = "Cancel Download",
+    )
+    return
+  }
+
+  IconButton(
+    onClick = if (isInstalled) onDelete else onDownload,
+    modifier = Modifier.size(32.dp),
+  ) {
+    Icon(
+      painter =
+        painterResource(
+          id =
+            when {
+              isInstalled -> R.drawable.delete
+              downloadState?.isCancelled == true || downloadState?.error != null -> R.drawable.refresh
+              else -> R.drawable.add
+            },
+        ),
+      contentDescription =
+        when {
+          isInstalled -> "Delete"
+          downloadState?.isCancelled == true || downloadState?.error != null -> "Retry Download"
+          else -> "Download"
+        },
+      modifier = Modifier.size(18.dp),
+    )
+  }
+}
+
+@Composable
+private fun FeatureActionButton(
+  downloadState: DownloadState?,
+  isInstalled: Boolean,
+  onDownload: () -> Unit,
+  onDelete: () -> Unit,
+  onCancel: () -> Unit,
+) {
+  if (downloadState?.isDownloading == true) {
+    ProgressIconButton(
+      downloadState = downloadState,
+      onClick = onCancel,
+      contentDescription = "Cancel Download",
+    )
+    return
+  }
+
+  IconButton(
+    onClick = if (isInstalled) onDelete else onDownload,
+    modifier = Modifier.size(32.dp),
+  ) {
+    Icon(
+      painter =
+        painterResource(
+          id =
+            when {
+              isInstalled -> R.drawable.delete
+              downloadState?.isCancelled == true || downloadState?.error != null -> R.drawable.refresh
+              else -> R.drawable.add
+            },
+        ),
+      contentDescription =
+        when {
+          isInstalled -> "Delete Feature"
+          downloadState?.isCancelled == true || downloadState?.error != null -> "Retry Download"
+          else -> "Download Feature"
+        },
+      modifier = Modifier.size(18.dp),
+    )
+  }
+}
+
+@Composable
+private fun ProgressIconButton(
+  downloadState: DownloadState,
+  onClick: () -> Unit,
+  contentDescription: String,
+) {
+  Box(
+    contentAlignment = Alignment.Center,
+    modifier = Modifier.size(32.dp),
+  ) {
+    val targetProgress =
+      if (downloadState.totalSize > 0) {
+        downloadState.downloaded.toFloat() / downloadState.totalSize.toFloat()
+      } else {
+        0f
+      }
+    val animatedProgress by animateFloatAsState(
+      targetValue = targetProgress,
+      animationSpec = tween(durationMillis = 300),
+      label = "progress",
+    )
+
+    CircularProgressIndicator(
+      progress = { animatedProgress },
+      modifier = Modifier.size(22.dp),
+      strokeWidth = 2.dp,
+    )
+    IconButton(
+      onClick = onClick,
+      modifier = Modifier.size(28.dp),
+    ) {
+      Icon(
+        painter = painterResource(id = R.drawable.cancel),
+        contentDescription = contentDescription,
+        modifier = Modifier.size(14.dp),
+      )
+    }
+  }
+}
+
+private fun formatSize(sizeBytes: Long): String {
+  val sizeMiB = sizeBytes / (1024f * 1024f)
+  return if (sizeMiB < 1f) {
+    "<1 MB"
+  } else {
+    "${sizeMiB.roundToInt()} MB"
+  }
+}
+
+private fun buildDictionarySecondaryLabel(
+  sizeBytes: Long,
+  type: String?,
+): String? {
+  val parts = mutableListOf(formatSize(sizeBytes))
+  dictionaryTypeLabel(type)?.let(parts::add)
+  return parts.takeIf { it.isNotEmpty() }?.joinToString(", ")
+}
+
+private fun dictionaryTypeLabel(type: String?): String? =
+  when (type?.lowercase()) {
+    null, "" -> null
+    "english" -> "English"
+    "bilingual" -> "Bilingual"
+    else -> type.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+  }
+
+private fun formatQualityLabel(quality: String?): String =
+  when (quality?.lowercase()) {
+    "x_low" -> "Extra-low"
+    null, "" -> "Unknown"
+    else -> quality.replace('_', '-').replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+  }
+
+private fun formatVoiceName(voice: String): String =
+  voice
+    .replace('_', ' ')
+    .replace('-', ' ')
+    .split(' ')
+    .filter { it.isNotBlank() }
+    .joinToString(" ") { token ->
+      token.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    }

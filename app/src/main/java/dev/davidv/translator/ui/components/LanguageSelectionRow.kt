@@ -29,17 +29,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import dev.davidv.translator.LangAvailability
 import dev.davidv.translator.Language
 import dev.davidv.translator.LanguageMetadata
 import dev.davidv.translator.R
 import dev.davidv.translator.TranslatorMessage
+import dev.davidv.translator.canSwapLanguages
 import dev.davidv.translator.ui.theme.TranslatorTheme
 
 @Composable
 fun LanguageSelectionRow(
   from: Language,
   to: Language,
-  availableLanguages: Map<Language, Boolean>,
+  availableLanguages: Map<Language, LangAvailability>,
   languageMetadata: Map<Language, LanguageMetadata>,
   onMessage: (TranslatorMessage) -> Unit,
   onSettings: (() -> Unit)?,
@@ -50,8 +52,14 @@ fun LanguageSelectionRow(
     horizontalArrangement = Arrangement.spacedBy(8.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    val fromLanguages = Language.entries.filter { x -> x != to && x != from && availableLanguages[x] == true }
-    val toLanguages = Language.entries.filter { x -> x != from && x != to && availableLanguages[x] == true }
+    val fromLanguages =
+      availableLanguages.keys.filter { x ->
+        x != to && x != from && (availableLanguages[x]?.hasToEnglish == true || x.isEnglish)
+      }
+    val toLanguages =
+      availableLanguages.keys.filter { x ->
+        x != from && x != to && (availableLanguages[x]?.hasFromEnglish == true || x.isEnglish)
+      }
 
     LanguageSelector(
       selectedLanguage = from,
@@ -63,9 +71,11 @@ fun LanguageSelectionRow(
       modifier = Modifier.weight(1f),
     )
 
-    IconButton(onClick = {
-      onMessage(TranslatorMessage.SwapLanguages)
-    }) {
+    val canSwap = canSwapLanguages(from, to, availableLanguages)
+    IconButton(
+      onClick = { onMessage(TranslatorMessage.SwapLanguages) },
+      enabled = canSwap,
+    ) {
       Icon(
         painterResource(id = R.drawable.compare),
         contentDescription = "Reverse translation direction",
@@ -93,27 +103,45 @@ fun LanguageSelectionRow(
   }
 }
 
+private fun previewLanguage(
+  code: String,
+  name: String,
+) = Language(
+  code = code,
+  displayName = name,
+  shortDisplayName = name,
+  tessName = code,
+  script = "Latn",
+  dictionaryCode = code,
+  tessdataSizeBytes = 0,
+  toEnglish = null,
+  fromEnglish = null,
+  extraFiles = emptyList(),
+)
+
 @Preview(showBackground = true)
 @Composable
 fun LanguageSelectionRowPreview() {
   TranslatorTheme {
     LanguageSelectionRow(
-      from = Language.ENGLISH,
-      to = Language.SPANISH,
-      availableLanguages =
-        mapOf(
-          Language.ENGLISH to true,
-          Language.SPANISH to true,
-          Language.FRENCH to true,
-          Language.GERMAN to true,
-        ),
-      languageMetadata = mapOf(Language.SPANISH to LanguageMetadata(favorite = true)),
+      from = previewLanguage("en", "English"),
+      to = previewLanguage("es", "Spanish"),
+      availableLanguages = previewAvailability(),
+      languageMetadata = mapOf(previewLanguage("es", "Spanish") to LanguageMetadata(favorite = true)),
       onMessage = {},
       onSettings = {},
       drawable = Pair("Settings", R.drawable.settings),
     )
   }
 }
+
+private fun previewAvailability() =
+  mapOf(
+    previewLanguage("en", "English") to LangAvailability(hasFromEnglish = true, hasToEnglish = true, ocrFiles = true, dictionaryFiles = false),
+    previewLanguage("es", "Spanish") to LangAvailability(hasFromEnglish = true, hasToEnglish = true, ocrFiles = true, dictionaryFiles = false),
+    previewLanguage("fr", "French") to LangAvailability(hasFromEnglish = true, hasToEnglish = true, ocrFiles = true, dictionaryFiles = false),
+    previewLanguage("de", "German") to LangAvailability(hasFromEnglish = true, hasToEnglish = true, ocrFiles = true, dictionaryFiles = false),
+  )
 
 @Preview(
   showBackground = true,
@@ -123,16 +151,10 @@ fun LanguageSelectionRowPreview() {
 fun LanguageSelectionRowDarkPreview() {
   TranslatorTheme {
     LanguageSelectionRow(
-      from = Language.FRENCH,
-      to = Language.GERMAN,
-      availableLanguages =
-        mapOf(
-          Language.ENGLISH to true,
-          Language.SPANISH to true,
-          Language.FRENCH to true,
-          Language.GERMAN to true,
-        ),
-      languageMetadata = mapOf(Language.FRENCH to LanguageMetadata(favorite = true)),
+      from = previewLanguage("fr", "French"),
+      to = previewLanguage("de", "German"),
+      availableLanguages = previewAvailability(),
+      languageMetadata = mapOf(previewLanguage("fr", "French") to LanguageMetadata(favorite = true)),
       onMessage = {},
       onSettings = {},
       drawable = Pair("Settings", R.drawable.settings),

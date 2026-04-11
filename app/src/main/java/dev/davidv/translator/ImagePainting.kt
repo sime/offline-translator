@@ -23,7 +23,84 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.text.TextPaint
+import android.util.Log
 import kotlin.math.floor
+
+data class OverlayColors(val background: Int, val foreground: Int)
+
+private const val REPAINT_DEBUG_TAG = "RepaintBlocks"
+
+fun getOverlayColors(
+  bitmap: Bitmap,
+  bounds: Rect,
+  backgroundMode: BackgroundMode,
+  wordRects: Array<Rect>? = null,
+): OverlayColors {
+  return when (backgroundMode) {
+    BackgroundMode.WHITE_ON_BLACK -> OverlayColors(Color.BLACK, Color.WHITE)
+    BackgroundMode.BLACK_ON_WHITE -> OverlayColors(Color.WHITE, Color.BLACK)
+    BackgroundMode.AUTO_DETECT -> {
+      val bgColor =
+        if (wordRects != null && wordRects.count() > 1) {
+          getBackgroundColorExcludingWords(bitmap, bounds, wordRects)
+        } else if (wordRects != null) {
+          getSurroundingAverageColor(bitmap, bounds)
+        } else {
+          sampleDominantColor(bitmap, bounds)
+        }
+      val fgColor = getForegroundColorByContrast(bitmap, bounds, bgColor)
+      OverlayColors(bgColor, fgColor)
+    }
+  }
+}
+
+fun sampleDominantColor(
+  bitmap: Bitmap,
+  bounds: Rect,
+): Int {
+  val left = bounds.left.coerceIn(0, bitmap.width - 1)
+  val top = bounds.top.coerceIn(0, bitmap.height - 1)
+  val right = bounds.right.coerceIn(left + 1, bitmap.width)
+  val bottom = bounds.bottom.coerceIn(top + 1, bitmap.height)
+  val w = right - left
+  val h = bottom - top
+  if (w <= 0 || h <= 0) return Color.WHITE
+
+  val pixels = IntArray(w * h)
+  bitmap.getPixels(pixels, 0, w, left, top, w, h)
+
+  val step = maxOf(1, pixels.size / 500)
+
+  data class Bucket(var count: Int, var rSum: Long, var gSum: Long, var bSum: Long)
+  val buckets = mutableMapOf<Int, Bucket>()
+
+  var i = 0
+  while (i < pixels.size) {
+    val pixel = pixels[i]
+    val key = Color.rgb(Color.red(pixel) and 0xF0, Color.green(pixel) and 0xF0, Color.blue(pixel) and 0xF0)
+    val existing = buckets[key]
+    if (existing != null) {
+      existing.count++
+      existing.rSum += Color.red(pixel)
+      existing.gSum += Color.green(pixel)
+      existing.bSum += Color.blue(pixel)
+    } else {
+      buckets[key] = Bucket(1, Color.red(pixel).toLong(), Color.green(pixel).toLong(), Color.blue(pixel).toLong())
+    }
+    i += step
+  }
+
+  val best =
+    buckets.values
+      .maxByOrNull { it.count }
+      ?: return Color.WHITE
+
+  return Color.rgb(
+    (best.rSum / best.count).toInt(),
+    (best.gSum / best.count).toInt(),
+    (best.bSum / best.count).toInt(),
+  )
+}
 
 sealed class TextFitResult {
   object DoesNotFit : TextFitResult()
@@ -45,24 +122,29 @@ fun getForegroundColorByContrast(
 ): Int {
   val bgLuminance = getLuminance(backgroundColor)
   val bestNaiveColor = if (bgLuminance > 0.5) Color.BLACK else Color.WHITE
-  if (textBounds.width() <= 0 || textBounds.height() <= 0) {
+
+  val left = textBounds.left.coerceIn(0, bitmap.width - 1)
+  val top = textBounds.top.coerceIn(0, bitmap.height - 1)
+  val right = textBounds.right.coerceIn(left + 1, bitmap.width)
+  val bottom = textBounds.bottom.coerceIn(top + 1, bitmap.height)
+  val width = right - left
+  val height = bottom - top
+  if (width <= 0 || height <= 0) {
     return bestNaiveColor
   }
 
-  val pixels = IntArray(textBounds.width() * textBounds.height())
+  val pixels = IntArray(width * height)
   bitmap.getPixels(
     pixels,
     0,
-    textBounds.width(),
-    textBounds.left,
-    textBounds.top,
-    textBounds.width(),
-    textBounds.height(),
+    width,
+    left,
+    top,
+    width,
+    height,
   )
-
-  val width = textBounds.width()
   // Sample 1 out of every 5 pixels
-  val step = maxOf(1, minOf(width, textBounds.height()) / 5)
+  val step = maxOf(1, minOf(width, height) / 5)
 
   // quantized color -> (count, sum of contrasts, first original color)
   val colorData = mutableMapOf<Int, Triple<Int, Float, Int>>()
@@ -146,23 +228,9 @@ fun removeTextWithSmartBlur(
   words: Array<Rect>,
   backgroundMode: BackgroundMode = BackgroundMode.AUTO_DETECT,
 ): Int {
-  val (surroundingColor, fgColor) =
-    when (backgroundMode) {
-      BackgroundMode.WHITE_ON_BLACK -> Pair(Color.BLACK, Color.WHITE)
-      BackgroundMode.BLACK_ON_WHITE -> Pair(Color.WHITE, Color.BLACK)
-      BackgroundMode.AUTO_DETECT -> {
-        val detectedSurroundingColor =
-          if (words.count() <= 1) {
-            getSurroundingAverageColor(bitmap, textBounds)
-          } else {
-            getBackgroundColorExcludingWords(bitmap, textBounds, words)
-          }
-        val detectedFgColor =
-          getForegroundColorByContrast(bitmap, textBounds, detectedSurroundingColor)
-
-        Pair(detectedSurroundingColor, detectedFgColor)
-      }
-    }
+  val colors = getOverlayColors(bitmap, textBounds, backgroundMode, words)
+  val surroundingColor = colors.background
+  val fgColor = colors.foreground
   var paint =
     Paint().apply {
       color = surroundingColor
@@ -301,6 +369,69 @@ fun doesTextFitInLines(
   }
 }
 
+fun doesTextFitInRect(
+  text: String,
+  bounds: Rect,
+  textPaint: TextPaint,
+): TextFitResult {
+  if (text.isEmpty()) return TextFitResult.Fits(emptyList())
+  if (bounds.width() <= 0 || bounds.height() <= 0) return TextFitResult.DoesNotFit
+
+  val lineHeight = textPaint.descent() - textPaint.ascent()
+  val maxLines = floor(bounds.height() / lineHeight).toInt().coerceAtLeast(1)
+  val lineBreaks = mutableListOf<TextLineBreak>()
+  var start = 0
+
+  while (start < text.length && lineBreaks.size < maxLines) {
+    while (start < text.length && text[start] == ' ') {
+      start++
+    }
+    if (start >= text.length) break
+
+    val newlineIndex = text.indexOf('\n', startIndex = start).let { if (it == -1) text.length else it }
+    val measuredWidth = FloatArray(1)
+    val countedChars =
+      textPaint.breakText(
+        text,
+        start,
+        newlineIndex,
+        true,
+        bounds.width().toFloat(),
+        measuredWidth,
+      )
+    if (countedChars <= 0) {
+      return TextFitResult.DoesNotFit
+    }
+
+    val rawEnd = start + countedChars
+    val endIndex =
+      when {
+        rawEnd >= newlineIndex -> newlineIndex
+        else -> {
+          val previousSpaceIndex = text.lastIndexOf(' ', startIndex = rawEnd - 1)
+          if (previousSpaceIndex >= start) previousSpaceIndex else rawEnd
+        }
+      }
+
+    val safeEnd = if (endIndex <= start) rawEnd else endIndex
+    lineBreaks.add(TextLineBreak(start, safeEnd))
+    start = safeEnd
+
+    while (start < text.length && text[start] == ' ') {
+      start++
+    }
+    if (start < text.length && text[start] == '\n') {
+      start++
+    }
+  }
+
+  return if (start >= text.length) {
+    TextFitResult.Fits(lineBreaks)
+  } else {
+    TextFitResult.DoesNotFit
+  }
+}
+
 fun paintTranslatedTextOver(
   originalBitmap: Bitmap,
   textBlocks: Array<TextBlock>,
@@ -319,6 +450,12 @@ fun paintTranslatedTextOver(
   var allTranslatedText = ""
 
   textBlocks.forEachIndexed { i, textBlock ->
+    debugRepaintBlock(
+      blockIndex = i,
+      textBlock = textBlock,
+      translated = translatedBlocks.getOrNull(i),
+    )
+
     val blockAvgPixelHeight =
       textBlock.lines
         .map { textLine -> textLine.boundingBox.height() }
@@ -398,6 +535,108 @@ fun paintTranslatedTextOver(
 
   return Pair(mutableBitmap, allTranslatedText.trim())
 }
+
+fun paintTranslatedTextOverVerticalBlocks(
+  originalBitmap: Bitmap,
+  textBlocks: Array<TextBlock>,
+  translatedBlocks: List<String>,
+  backgroundMode: BackgroundMode = BackgroundMode.AUTO_DETECT,
+): Pair<Bitmap, String> {
+  val mutableBitmap = originalBitmap.copy(originalBitmap.config, true)
+  val canvas = Canvas(mutableBitmap)
+  val textPaint =
+    TextPaint().apply {
+      isAntiAlias = true
+    }
+
+  var allTranslatedText = ""
+
+  textBlocks.forEachIndexed { i, textBlock ->
+    val translated = translatedBlocks.getOrNull(i) ?: return@forEachIndexed
+    debugRepaintBlock(
+      blockIndex = i,
+      textBlock = textBlock,
+      translated = translated,
+    )
+
+    allTranslatedText = "${allTranslatedText}\n$translated"
+
+    val blockBounds = textBlock.blockBounds()
+    val allWordRects = textBlock.lines.flatMap { it.wordRects.asList() }.toTypedArray()
+    val minTextSize = 8f
+    val initialTextSize =
+      floor(
+        textBlock.lines
+          .map { line -> line.boundingBox.width() }
+          .average()
+          .toFloat(),
+      ).coerceAtLeast(minTextSize)
+
+    textPaint.textSize = initialTextSize
+    var fitResult = doesTextFitInRect(translated, blockBounds, textPaint)
+    while (fitResult is TextFitResult.DoesNotFit && textPaint.textSize > minTextSize) {
+      textPaint.textSize -= 1f
+      fitResult = doesTextFitInRect(translated, blockBounds, textPaint)
+    }
+
+    val foregroundColor =
+      removeTextWithSmartBlur(
+        canvas,
+        mutableBitmap,
+        blockBounds,
+        allWordRects,
+        backgroundMode,
+      )
+    textPaint.color = foregroundColor
+
+    if (fitResult is TextFitResult.Fits) {
+      val lineHeight = textPaint.descent() - textPaint.ascent()
+      val firstBaseline = blockBounds.top.toFloat() - textPaint.ascent()
+      fitResult.lineBreaks.forEachIndexed { lineIndex, lineBreak ->
+        if (lineBreak.startIndex >= translated.length) return@forEachIndexed
+        canvas.drawText(
+          translated,
+          lineBreak.startIndex,
+          lineBreak.endIndex,
+          blockBounds.left.toFloat(),
+          firstBaseline + (lineIndex * lineHeight),
+          textPaint,
+        )
+      }
+    }
+  }
+
+  return Pair(mutableBitmap, allTranslatedText.trim())
+}
+
+private fun debugRepaintBlock(
+  blockIndex: Int,
+  textBlock: TextBlock,
+  translated: String?,
+) {
+  val blockBounds = textBlock.blockBounds()
+  val sourceText = textBlock.lines.joinToString(separator = " | ") { it.text }
+  Log.d(
+    REPAINT_DEBUG_TAG,
+    "block[$blockIndex] bounds=${blockBounds.compactString()} lines=${textBlock.lines.size} src=\"$sourceText\" translated=\"${translated ?: ""}\"",
+  )
+  textBlock.lines.forEachIndexed { lineIndex, line ->
+    val wordRects = line.wordRects.joinToString(separator = ",") { it.compactString() }
+    Log.d(
+      REPAINT_DEBUG_TAG,
+      "block[$blockIndex] line[$lineIndex] bounds=${line.boundingBox.compactString()} words=${line.wordRects.size} text=\"${line.text}\" wordRects=[$wordRects]",
+    )
+  }
+}
+
+private fun TextBlock.blockBounds(): Rect {
+  val first = lines.firstOrNull()?.boundingBox ?: return Rect(0, 0, 0, 0)
+  val combined = Rect(first)
+  lines.drop(1).forEach { combined.union(it.boundingBox) }
+  return combined
+}
+
+private fun Rect.compactString(): String = "[$left,$top,$right,$bottom]"
 
 private fun toAndroidRect(r: Rect): android.graphics.Rect = android.graphics.Rect(r.left, r.top, r.right, r.bottom)
 

@@ -25,6 +25,7 @@ import android.util.Log
 import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FloatingActionButton
@@ -76,6 +78,7 @@ import dev.davidv.translator.Language
 import dev.davidv.translator.LanguageMetadata
 import dev.davidv.translator.LaunchMode
 import dev.davidv.translator.R
+import dev.davidv.translator.ReadingOrder
 import dev.davidv.translator.TranslatedText
 import dev.davidv.translator.TranslatorMessage
 import dev.davidv.translator.WordWithTaggedEntries
@@ -105,13 +108,17 @@ fun MainScreen(
   to: Language,
   detectedLanguage: Language?,
   displayImage: Bitmap?,
+  ocrReadingOrder: ReadingOrder,
   isTranslating: StateFlow<Boolean>,
   isOcrInProgress: StateFlow<Boolean>,
   dictionaryWord: WordWithTaggedEntries?,
   dictionaryStack: List<WordWithTaggedEntries>,
   dictionaryLookupLanguage: Language?,
+  isAudioPlaying: Boolean = false,
+  isAudioLoading: Boolean = false,
   // Action requests
   onMessage: (TranslatorMessage) -> Unit,
+  onStopAudio: () -> Unit = {},
   // System integration
   availableLanguages: Map<Language, LangAvailability>,
   languageMetadata: Map<Language, LanguageMetadata>,
@@ -186,7 +193,7 @@ fun MainScreen(
         LanguageSelectionRow(
           from = from,
           to = to,
-          availableLanguages = availableLanguages.mapValues { it.value.translatorFiles },
+          availableLanguages = availableLanguages,
           languageMetadata = languageMetadata,
           onMessage = onMessage,
           drawable =
@@ -239,9 +246,21 @@ fun MainScreen(
                   isTranslating = isTranslating,
                   onShowFullScreenImage = { showFullScreenImage = true },
                 )
-                Row(modifier = Modifier.align(Alignment.TopEnd)) {
-                  ClearInput(onMessage)
+                Row(
+                  modifier =
+                    Modifier
+                      .align(Alignment.TopEnd)
+                      .padding(8.dp),
+                  horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                  if (from.code == "ja") {
+                    JapaneseOcrModeToggle(
+                      readingOrder = ocrReadingOrder,
+                      onMessage = onMessage,
+                    )
+                  }
                   ShareImage(onMessage)
+                  ClearInput(onMessage)
                 }
               }
             }
@@ -368,6 +387,18 @@ fun MainScreen(
                 onDictionaryLookup = {
                   onMessage(TranslatorMessage.DictionaryLookup(it, to))
                 },
+                canSpeak = availableLanguages[to]?.ttsFiles == true,
+                isAudioPlaying = isAudioPlaying,
+                isAudioLoading = isAudioLoading,
+                onSpeak = {
+                  if (isAudioPlaying || isAudioLoading) {
+                    onStopAudio()
+                  } else {
+                    output?.translated?.takeIf { it.isNotBlank() }?.let { translatedText ->
+                      onMessage(TranslatorMessage.SpeakTranslatedText(translatedText, to))
+                    }
+                  }
+                },
               )
             }
           }
@@ -395,18 +426,16 @@ fun MainScreen(
     )
   }
 
-  // Dictionary bottom sheet
-  if (dictionaryWord != null) {
+  if (dictionaryWord != null && dictionaryLookupLanguage != null) {
     DictionaryBottomSheet(
       dictionaryWord = dictionaryWord,
       dictionaryStack = dictionaryStack,
-      // DictionaryLookupLanguage should always be set if dictionaryWord if set
-      dictionaryLookupLanguage = dictionaryLookupLanguage ?: Language.ENGLISH,
+      dictionaryLookupLanguage = dictionaryLookupLanguage,
       onDismiss = {
         onMessage(TranslatorMessage.ClearDictionaryStack)
       },
       onDictionaryLookup = { word ->
-        onMessage(TranslatorMessage.DictionaryLookup(word, dictionaryLookupLanguage ?: Language.ENGLISH))
+        onMessage(TranslatorMessage.DictionaryLookup(word, dictionaryLookupLanguage))
       },
       onBackPressed = {
         onMessage(TranslatorMessage.PopDictionary)
@@ -417,41 +446,42 @@ fun MainScreen(
 
 @Composable
 fun ShareImage(onMessage: (TranslatorMessage) -> Unit) {
-  IconButton(
+  ActionPillButton(
+    iconRes = R.drawable.share,
+    contentDescription = "Share image",
     onClick = { onMessage(TranslatorMessage.ShareTranslatedImage) },
-    modifier =
-      Modifier
-        .size(32.dp),
-  ) {
-    Icon(
-      painterResource(id = R.drawable.share),
-      contentDescription = "Share image",
-      tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-    )
-  }
+  )
+}
+
+@Composable
+fun JapaneseOcrModeToggle(
+  readingOrder: ReadingOrder,
+  onMessage: (TranslatorMessage) -> Unit,
+) {
+  val isVertical = readingOrder == ReadingOrder.TOP_TO_BOTTOM_LEFT_TO_RIGHT
+  ActionPillButton(
+    iconRes = if (isVertical) R.drawable.text_rotate_vertical else R.drawable.text_rotation_none,
+    contentDescription = if (isVertical) "Japanese OCR vertical mode" else "Japanese OCR horizontal mode",
+    onClick = { onMessage(TranslatorMessage.ToggleJapaneseOcrMode) },
+  )
 }
 
 @Composable
 fun ClearInput(onMessage: (TranslatorMessage) -> Unit) {
-  IconButton(
+  ActionPillButton(
+    iconRes = R.drawable.cancel,
+    contentDescription = "Clear input",
     onClick = { onMessage(TranslatorMessage.ClearInput) },
-    modifier =
-      Modifier
-        .size(32.dp),
-  ) {
-    Icon(
-      painterResource(id = R.drawable.cancel),
-      contentDescription = "Clear input",
-      tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-    )
-  }
+  )
 }
 
 @Composable
 fun PasteButton(onMessage: (TranslatorMessage) -> Unit) {
   val context = LocalContext.current
 
-  IconButton(
+  ActionPillButton(
+    iconRes = R.drawable.paste,
+    contentDescription = "Paste",
     onClick = {
       val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
       val clipData = clipboardManager.primaryClip
@@ -460,15 +490,29 @@ fun PasteButton(onMessage: (TranslatorMessage) -> Unit) {
         onMessage(TranslatorMessage.TextInput(text))
       }
     },
-    modifier =
-      Modifier
-        .size(32.dp),
+  )
+}
+
+@Composable
+private fun ActionPillButton(
+  iconRes: Int,
+  contentDescription: String,
+  onClick: () -> Unit,
+) {
+  Surface(
+    shape = CircleShape,
+    color = Color(0xCC303030),
   ) {
-    Icon(
-      painterResource(id = R.drawable.paste),
-      contentDescription = "Paste",
-      tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-    )
+    IconButton(
+      onClick = onClick,
+      modifier = Modifier.size(36.dp),
+    ) {
+      Icon(
+        painterResource(id = iconRes),
+        contentDescription = contentDescription,
+        tint = Color.White,
+      )
+    }
   }
 }
 
@@ -497,6 +541,22 @@ fun WideDialogTheme(content: @Composable () -> Unit) {
   }
 }
 
+private fun previewLanguage(
+  code: String,
+  name: String,
+) = Language(
+  code = code,
+  displayName = name,
+  shortDisplayName = name,
+  tessName = code,
+  script = "Latn",
+  dictionaryCode = code,
+  tessdataSizeBytes = 0,
+  toEnglish = null,
+  fromEnglish = null,
+  extraFiles = emptyList(),
+)
+
 @Preview(
   showBackground = true,
   uiMode = Configuration.UI_MODE_NIGHT_YES,
@@ -508,21 +568,22 @@ fun PopupMode() {
       onSettings = { },
       input = "Example input",
       output = TranslatedText("Example output", null),
-      from = Language.AZERBAIJANI,
-      to = Language.SPANISH,
-      detectedLanguage = Language.FRENCH,
+      from = previewLanguage("az", "Azerbaijani"),
+      to = previewLanguage("es", "Spanish"),
+      detectedLanguage = previewLanguage("fr", "French"),
       displayImage = null,
+      ocrReadingOrder = ReadingOrder.LEFT_TO_RIGHT,
       isTranslating = MutableStateFlow(false).asStateFlow(),
       isOcrInProgress = MutableStateFlow(false).asStateFlow(),
       launchMode = LaunchMode.ReadWriteModal {},
       onMessage = {},
       availableLanguages =
         mapOf(
-          Language.ENGLISH to LangAvailability(true, true, true),
-          Language.SPANISH to LangAvailability(true, true, true),
-          Language.FRENCH to LangAvailability(true, true, true),
+          previewLanguage("en", "English") to LangAvailability(true, true, true, true),
+          previewLanguage("es", "Spanish") to LangAvailability(true, true, true, true),
+          previewLanguage("fr", "French") to LangAvailability(true, true, true, true),
         ),
-      languageMetadata = mapOf(Language.SPANISH to LanguageMetadata(favorite = true)),
+      languageMetadata = mapOf(previewLanguage("es", "Spanish") to LanguageMetadata(favorite = true)),
       downloadStates = emptyMap(),
       settings = AppSettings(),
       dictionaryWord = null,
@@ -544,21 +605,22 @@ fun MainScreenPreview() {
       onSettings = { },
       input = "Example input",
       output = TranslatedText("Example output", null),
-      from = Language.ENGLISH,
-      to = Language.SPANISH,
-      detectedLanguage = Language.FRENCH,
+      from = previewLanguage("en", "English"),
+      to = previewLanguage("es", "Spanish"),
+      detectedLanguage = previewLanguage("fr", "French"),
       displayImage = null,
+      ocrReadingOrder = ReadingOrder.LEFT_TO_RIGHT,
       isTranslating = MutableStateFlow(false).asStateFlow(),
       isOcrInProgress = MutableStateFlow(false).asStateFlow(),
       launchMode = LaunchMode.Normal,
       onMessage = {},
       availableLanguages =
         mapOf(
-          Language.ENGLISH to LangAvailability(true, true, true),
-          Language.SPANISH to LangAvailability(true, true, true),
-          Language.FRENCH to LangAvailability(true, true, true),
+          previewLanguage("en", "English") to LangAvailability(true, true, true, true),
+          previewLanguage("es", "Spanish") to LangAvailability(true, true, true, true),
+          previewLanguage("fr", "French") to LangAvailability(true, true, true, true),
         ),
-      languageMetadata = mapOf(Language.SPANISH to LanguageMetadata(favorite = true)),
+      languageMetadata = mapOf(previewLanguage("es", "Spanish") to LanguageMetadata(favorite = true)),
       downloadStates = emptyMap(),
       settings = AppSettings(),
       dictionaryWord = null,
@@ -584,23 +646,24 @@ fun PreviewTranslitText() {
           "Tokyo",
           null,
         ),
-      from = Language.JAPANESE,
-      to = Language.ENGLISH,
+      from = previewLanguage("ja", "Japanese"),
+      to = previewLanguage("en", "English"),
       detectedLanguage = null,
       displayImage = null,
+      ocrReadingOrder = ReadingOrder.LEFT_TO_RIGHT,
       isTranslating = MutableStateFlow(false).asStateFlow(),
       isOcrInProgress = MutableStateFlow(false).asStateFlow(),
       launchMode = LaunchMode.Normal,
       onMessage = {},
       availableLanguages =
         mapOf(
-          Language.ENGLISH to LangAvailability(true, true, true),
-          Language.SPANISH to LangAvailability(true, true, true),
-          Language.FRENCH to LangAvailability(true, true, true),
+          previewLanguage("en", "English") to LangAvailability(true, true, true, true),
+          previewLanguage("es", "Spanish") to LangAvailability(true, true, true, true),
+          previewLanguage("fr", "French") to LangAvailability(true, true, true, true),
         ),
       downloadStates = emptyMap(),
       settings = AppSettings(showTransliterationOnInput = true),
-      languageMetadata = mapOf(Language.SPANISH to LanguageMetadata(favorite = true)),
+      languageMetadata = mapOf(previewLanguage("es", "Spanish") to LanguageMetadata(favorite = true)),
       dictionaryWord = null,
       dictionaryStack = emptyList(),
       dictionaryLookupLanguage = null,
@@ -625,23 +688,24 @@ fun PreviewVeryLongText() {
           vlong,
           null,
         ),
-      from = Language.ENGLISH,
-      to = Language.ENGLISH,
+      from = previewLanguage("en", "English"),
+      to = previewLanguage("en", "English"),
       detectedLanguage = null,
       displayImage = null,
+      ocrReadingOrder = ReadingOrder.LEFT_TO_RIGHT,
       isTranslating = MutableStateFlow(false).asStateFlow(),
       isOcrInProgress = MutableStateFlow(false).asStateFlow(),
       launchMode = LaunchMode.Normal,
       onMessage = {},
       availableLanguages =
         mapOf(
-          Language.ENGLISH to LangAvailability(true, true, true),
-          Language.SPANISH to LangAvailability(true, true, true),
-          Language.FRENCH to LangAvailability(true, true, true),
+          previewLanguage("en", "English") to LangAvailability(true, true, true, true),
+          previewLanguage("es", "Spanish") to LangAvailability(true, true, true, true),
+          previewLanguage("fr", "French") to LangAvailability(true, true, true, true),
         ),
       downloadStates = emptyMap(),
       settings = AppSettings(showTransliterationOnInput = true),
-      languageMetadata = mapOf(Language.SPANISH to LanguageMetadata(favorite = true)),
+      languageMetadata = mapOf(previewLanguage("es", "Spanish") to LanguageMetadata(favorite = true)),
       dictionaryWord = null,
       dictionaryStack = emptyList(),
       dictionaryLookupLanguage = null,
@@ -670,23 +734,24 @@ fun PreviewVeryLongTextImage() {
           vlong,
           null,
         ),
-      from = Language.ENGLISH,
-      to = Language.ENGLISH,
+      from = previewLanguage("en", "English"),
+      to = previewLanguage("en", "English"),
       detectedLanguage = null,
       displayImage = bitmap,
+      ocrReadingOrder = ReadingOrder.LEFT_TO_RIGHT,
       isTranslating = MutableStateFlow(false).asStateFlow(),
       isOcrInProgress = MutableStateFlow(false).asStateFlow(),
       launchMode = LaunchMode.Normal,
       onMessage = {},
       availableLanguages =
         mapOf(
-          Language.ENGLISH to LangAvailability(true, true, true),
-          Language.SPANISH to LangAvailability(true, true, true),
-          Language.FRENCH to LangAvailability(true, true, true),
+          previewLanguage("en", "English") to LangAvailability(true, true, true, true),
+          previewLanguage("es", "Spanish") to LangAvailability(true, true, true, true),
+          previewLanguage("fr", "French") to LangAvailability(true, true, true, true),
         ),
       downloadStates = emptyMap(),
       settings = AppSettings(),
-      languageMetadata = mapOf(Language.SPANISH to LanguageMetadata(favorite = true)),
+      languageMetadata = mapOf(previewLanguage("es", "Spanish") to LanguageMetadata(favorite = true)),
       dictionaryWord = null,
       dictionaryStack = emptyList(),
       dictionaryLookupLanguage = null,

@@ -1,0 +1,53 @@
+/*
+ * Copyright (C) 2024 David V
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package dev.davidv.translator
+
+import android.app.Application
+import android.util.Log
+
+class TranslatorApplication : Application() {
+  lateinit var settingsManager: SettingsManager
+  lateinit var languageMetadataManager: LanguageMetadataManager
+  lateinit var filePathManager: FilePathManager
+  lateinit var ocrService: OCRService
+  lateinit var imageProcessor: ImageProcessor
+  lateinit var translationService: TranslationService
+  lateinit var languageDetector: LanguageDetector
+  lateinit var translationCoordinator: TranslationCoordinator
+  val languagesFlow = kotlinx.coroutines.flow.MutableStateFlow<List<Language>>(emptyList())
+  var languageCatalog: LanguageCatalog? = null
+    private set
+
+  override fun onCreate() {
+    super.onCreate()
+    Log.d("TranslatorApplication", "Initializing application services")
+
+    settingsManager = SettingsManager(this)
+    filePathManager = FilePathManager(this, settingsManager.settings)
+    languageCatalog = filePathManager.loadCatalog()
+    languagesFlow.value = languageCatalog?.languageList ?: emptyList()
+    languageMetadataManager = LanguageMetadataManager(this, languagesFlow)
+    ocrService = OCRService(filePathManager)
+    imageProcessor = ImageProcessor(this, ocrService)
+    val english = languageCatalog?.english ?: Language(code = "en", displayName = "English", shortDisplayName = "EN", tessName = "eng", script = "Latn", dictionaryCode = "en", tessdataSizeBytes = 0, toEnglish = null, fromEnglish = null, extraFiles = emptyList())
+    translationService = TranslationService(settingsManager, filePathManager, english)
+    languageDetector = LanguageDetector { code -> languageCatalog?.languageByCode(code) }
+    translationCoordinator =
+      TranslationCoordinator(translationService, languageDetector, imageProcessor, settingsManager)
+  }
+}
