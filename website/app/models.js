@@ -1,5 +1,5 @@
 const BASE_URL =
-  'https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data';
+  '/proxy/moz-fx-translations-data--303e-prod-translations-data';
 
 const LANGUAGES = [
   { code: 'sq', name: 'Albanian' },
