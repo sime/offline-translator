@@ -250,9 +250,41 @@ async function downloadCurrentPair() {
   const from = sourceLang.value;
   const to = targetLang.value;
   const langs = getRequiredLanguages(from, to);
+
+  const progressEl = document.getElementById('download-prompt-progress');
+  const fill = document.getElementById('download-prompt-fill');
+  const statusText = document.getElementById('download-prompt-status');
+
+  downloadPromptBtn.style.display = 'none';
+  progressEl.style.display = '';
+
   for (const code of langs) {
-    await downloadLanguage(code);
+    downloadingLanguages.add(code);
+    try {
+      await translator.downloadLanguage(code, (progress) => {
+        if (fill && progress.fileTotal > 0) {
+          const pct = Math.round((progress.fileReceived / progress.fileTotal) * 100);
+          fill.style.width = `${pct}%`;
+        }
+        if (statusText) {
+          statusText.textContent = `File ${progress.filesCompleted + 1}/${progress.filesTotal}`;
+        }
+      });
+    } catch (err) {
+      console.error('Download failed:', err);
+      if (statusText) statusText.textContent = 'Download failed';
+      downloadPromptBtn.style.display = '';
+      progressEl.style.display = 'none';
+      downloadingLanguages.delete(code);
+      return;
+    }
+    downloadingLanguages.delete(code);
   }
+
+  progressEl.style.display = 'none';
+  downloadPromptBtn.style.display = '';
+  renderLanguageList();
+  checkLanguageAvailability();
 }
 
 // Event listeners

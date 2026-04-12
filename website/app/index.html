@@ -29,6 +29,12 @@
     <div id="download-prompt" class="needs-download" style="display: none;">
       <p>Language pack not downloaded yet.</p>
       <button class="btn btn-primary" id="download-prompt-btn">Download</button>
+      <div id="download-prompt-progress" style="display: none; margin-top: 0.5rem;">
+        <div class="progress-bar" style="width: 100%;">
+          <div class="progress-bar-fill" id="download-prompt-fill" style="width: 0%"></div>
+        </div>
+        <span class="download-status" id="download-prompt-status"></span>
+      </div>
     </div>
 
     <div class="translation-area">
