@@ -21,3 +21,8 @@ app/x86
 app/release
 app/src/main/jniLibs/
 .wrangler/
+
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
